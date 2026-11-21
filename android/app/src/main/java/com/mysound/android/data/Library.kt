@@ -23,6 +23,8 @@ data class Track(
     val addedAt: Long,
     val fav: Boolean = false,
     val plays: Int = 0,
+    val rating: Int = 0, // 0 = ยังไม่ให้คะแนน, 1-5 ดาว
+    val cover: String? = null, // path ไฟล์ปก (เพลงที่ดาวน์โหลด)
 )
 
 /** 83000 -> "1:23" */
@@ -56,6 +58,7 @@ class LibraryStore(private val file: File) {
 
     fun add(list: List<Track>) = update(tracks + list)
     fun remove(id: Long) = update(tracks.filterNot { it.id == id })
+    fun edit(id: Long, f: (Track) -> Track) = update(tracks.map { if (it.id == id) f(it) else it })
     fun toggleFav(id: Long) = update(tracks.map { if (it.id == id) it.copy(fav = !it.fav) else it })
 }
 

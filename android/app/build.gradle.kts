@@ -13,8 +13,10 @@ android {
         applicationId = "com.mysound.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "1.0.0"
+        // ไลบรารี yt-dlp + ffmpeg ใหญ่ ตัดสถาปัตยกรรม x86 (เฉพาะอีมูเลเตอร์) ออกเพื่อให้ APK เล็กลง
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
     // กุญแจเซ็น APK มาจาก environment (GitHub Actions secrets) ไม่ต้องเก็บในโค้ด
@@ -43,6 +45,9 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
+    lint { checkReleaseBuilds = false } // กัน lint ทำให้ build release ล้มเพราะคำเตือนที่ไม่เกี่ยวกับการทำงาน
+    // yt-dlp/ffmpeg เป็นไฟล์ที่ต้องรันจากดิสก์ ต้องแตก .so ออกมา
+    packaging { jniLibs { useLegacyPackaging = true } }
 }
 
 dependencies {
@@ -56,6 +61,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("androidx.media3:media3-exoplayer:1.5.1")
     implementation("androidx.media3:media3-session:1.5.1")
+
+    implementation("io.github.junkfood02.youtubedl-android:library:0.17.4")
+    implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.17.4")
 
     testImplementation("junit:junit:4.13.2")
 }

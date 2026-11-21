@@ -1,21 +1,34 @@
 package com.mysound.android
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.ui.graphics.Color
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mysound.android.ui.MySoundApp
 import com.mysound.android.ui.MySoundTheme
 
 class MainActivity : ComponentActivity() {
+    private val vm: MainViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent {
-            val vm: MainViewModel = viewModel()
-            MySoundTheme(accent = Color(vm.accent)) { MySoundApp(vm) }
-        }
+        if (savedInstanceState == null) takeSharedLink(intent)
+        setContent { MySoundTheme(accent = Color(vm.accent)) { MySoundApp(vm) } }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        takeSharedLink(intent)
+    }
+
+    /** ปุ่มแชร์ของแอปอื่นส่งข้อความที่มีลิงก์มา: หยิบลิงก์แรกไปใส่หน้า Download */
+    private fun takeSharedLink(i: Intent?) {
+        if (i?.action != Intent.ACTION_SEND) return
+        val text = i.getStringExtra(Intent.EXTRA_TEXT) ?: return
+        Regex("https?://\\S+").find(text)?.value?.let { vm.incomingUrl = it }
     }
 }
