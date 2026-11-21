@@ -157,7 +157,7 @@ fun SettingsScreen(vm: MainViewModel) {
                 Box(
                     Modifier.size(44.dp).clip(CircleShape).background(color)
                         .border(if (selected) 3.dp else 0.dp, MaterialTheme.colorScheme.onBackground, CircleShape)
-                        .clickable(onClickLabel = "Use $name accent") { vm.setAccent(color.toArgb()) },
+                        .clickable(onClickLabel = "Use $name accent") { vm.chooseAccent(color.toArgb()) },
                 )
             }
         }

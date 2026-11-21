@@ -38,7 +38,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var accent by mutableIntStateOf(prefs.getInt("accent", 0xFF5EEAD4.toInt()))
         private set
 
-    fun setAccent(argb: Int) {
+    fun chooseAccent(argb: Int) {
         accent = argb
         prefs.edit().putInt("accent", argb).apply()
     }
