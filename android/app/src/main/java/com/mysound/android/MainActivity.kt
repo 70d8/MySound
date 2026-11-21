@@ -7,7 +7,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.ui.graphics.Color
+import com.mysound.android.ui.Layouts
+import com.mysound.android.ui.Look
 import com.mysound.android.ui.MySoundApp
+import com.mysound.android.ui.Themes
 import com.mysound.android.ui.MySoundTheme
 
 class MainActivity : ComponentActivity() {
@@ -17,7 +20,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         if (savedInstanceState == null) takeSharedLink(intent)
-        setContent { MySoundTheme(accent = Color(vm.accent)) { MySoundApp(vm) } }
+        setContent {
+            val look = Look(Color(vm.accent), Themes[vm.themeIdx], Layouts[vm.layoutIdx], vm.tintOn)
+            MySoundTheme(look) { MySoundApp(vm) }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

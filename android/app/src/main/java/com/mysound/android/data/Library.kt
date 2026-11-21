@@ -23,6 +23,7 @@ data class Track(
     val addedAt: Long,
     val fav: Boolean = false,
     val plays: Int = 0,
+    val lastPlayed: Long = 0, // เวลาที่เล่นล่าสุด (ms) ใช้หมวด "ไม่ได้ฟังนาน"
     val rating: Int = 0, // 0 = ยังไม่ให้คะแนน, 1-5 ดาว
     val cover: String? = null, // path ไฟล์ปก (เพลงที่ดาวน์โหลด)
 )

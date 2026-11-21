@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -29,6 +30,8 @@ import com.mysound.android.data.fetchLyrics
 import com.mysound.android.data.parseMarker
 import com.mysound.android.data.readTrack
 import com.mysound.android.playback.PlaybackService
+import com.mysound.android.ui.Layouts
+import com.mysound.android.ui.Themes
 import com.mysound.android.ui.appLang
 import com.mysound.android.ui.tr
 import kotlinx.coroutines.Dispatchers
@@ -49,8 +52,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     init { appLang = prefs.getString("lang", "en") ?: "en" }
 
     // ---- ค่าที่ผู้ใช้ตั้ง ----
-    var accent by mutableIntStateOf(prefs.getInt("accent", 0xFF5EEAD4.toInt()))
+    var themeIdx by mutableIntStateOf(prefs.getInt("theme", 0).coerceIn(0, Themes.lastIndex)); private set
+    var layoutIdx by mutableIntStateOf(prefs.getInt("layout", 0).coerceIn(0, Layouts.lastIndex)); private set
+    var tintOn by mutableStateOf(prefs.getBoolean("tint", true)); private set
+    var accent by mutableIntStateOf(prefs.getInt("accent", Themes[themeIdx].accent.toArgb()))
         private set
+
+    /** เลือกธีม: ใช้สีเน้นของธีมนั้น (เลือกสีเน้นเองทีหลังได้) */
+    fun chooseTheme(i: Int) {
+        themeIdx = i
+        accent = Themes[i].accent.toArgb()
+        prefs.edit().putInt("theme", i).putInt("accent", accent).apply()
+    }
+
+    fun chooseLayout(i: Int) {
+        layoutIdx = i
+        prefs.edit().putInt("layout", i).apply()
+    }
+
+    fun chooseTint(on: Boolean) {
+        tintOn = on
+        prefs.edit().putBoolean("tint", on).apply()
+    }
 
     fun chooseAccent(argb: Int) {
         accent = argb
@@ -65,11 +88,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---- รูปพื้นหลัง ----
     val bgFile = File(ctx.filesDir, "background.img")
     var bgVersion by mutableIntStateOf(if (bgFile.exists()) 1 else 0); private set
-    var bgDim by mutableFloatStateOf(prefs.getFloat("bgDim", 0.55f)); private set
+    var bgAlpha by mutableFloatStateOf(prefs.getFloat("bgAlpha", 0.6f)); private set
 
-    fun chooseBgDim(v: Float) {
-        bgDim = v
-        prefs.edit().putFloat("bgDim", v).apply()
+    fun chooseBgAlpha(v: Float) {
+        bgAlpha = v
+        prefs.edit().putFloat("bgAlpha", v).apply()
     }
 
     fun setBackground(uri: Uri) {
@@ -109,7 +132,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun sync(p: Player) {
         val id = p.currentMediaItem?.mediaId?.toLongOrNull()
         // นับจำนวนครั้งที่เล่น เมื่อเปลี่ยนมาเพลงใหม่ตั้งแต่ต้นเพลง
-        if (id != null && id != currentId && p.currentPosition < 3000) library.edit(id) { it.copy(plays = it.plays + 1) }
+        if (id != null && id != currentId && p.currentPosition < 3000) library.edit(id) { it.copy(plays = it.plays + 1, lastPlayed = System.currentTimeMillis()) }
         isPlaying = p.isPlaying
         currentId = id
         shuffle = p.shuffleModeEnabled

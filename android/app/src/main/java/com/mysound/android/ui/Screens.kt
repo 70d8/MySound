@@ -8,6 +8,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -15,6 +17,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.MoreVert
@@ -35,6 +38,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -49,7 +53,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -75,11 +82,12 @@ private fun TrackRow(vm: MainViewModel, t: Track, list: List<Track>, playlistId:
     var menu by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<String?>(null) }
     val now = vm.currentId == t.id
+    val rowH = LocalLook.current.layout.row.dp
     Row(
-        Modifier.fillMaxWidth().clickable { vm.play(t, list) }.padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+        Modifier.fillMaxWidth().heightIn(min = rowH).clickable { vm.play(t, list) }.padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Art(t.title, 48.dp, cover = t.cover)
+        Art(t.title, rowH - 12.dp, cover = t.cover)
         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
             Text(
                 t.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge,
@@ -126,22 +134,56 @@ private fun TrackRow(vm: MainViewModel, t: Track, list: List<Track>, playlistId:
 }
 
 @Composable
-fun HomeScreen(vm: MainViewModel, onAdd: () -> Unit) {
-    val recent = vm.library.tracks.sortedByDescending { it.addedAt }.take(20)
-    val top = vm.library.tracks.filter { it.plays > 0 }.sortedByDescending { it.plays }.take(5)
-    if (recent.isEmpty()) {
-        Column(Modifier.fillMaxSize()) {
-            Heading(tr("Recently added"))
-            Empty(tr("Your library is empty."), tr("Add songs from this phone"), onAdd)
-        }
-        return
+private fun TrackCard(vm: MainViewModel, t: Track, list: List<Track>) {
+    val look = LocalLook.current
+    val now = vm.currentId == t.id
+    Column(
+        Modifier.width(140.dp)
+            .clip(RoundedCornerShape((look.layout.radius * 3 / 4).coerceAtLeast(2).dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable { vm.play(t, list) }
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Art(t.title, 116.dp, modifier = Modifier.padding(bottom = 8.dp), cover = t.cover)
+        Text(t.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold, color = if (now) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+        Text(t.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
-        item { Heading(tr("Recently added")) }
-        items(recent, key = { "r${it.id}" }) { TrackRow(vm, it, recent) }
-        if (top.isNotEmpty()) {
-            item { Heading(tr("Most played")) }
-            items(top, key = { "p${it.id}" }) { TrackRow(vm, it, top) }
+}
+
+@Composable
+private fun Shelf(vm: MainViewModel, title: String, list: List<Track>, prefix: String) {
+    if (list.isEmpty()) return
+    Heading(title)
+    LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        items(list, key = { "$prefix${it.id}" }) { TrackCard(vm, it, list) }
+    }
+}
+
+@Composable
+fun HomeScreen(vm: MainViewModel, onAdd: () -> Unit, onDownload: () -> Unit) {
+    val all = vm.library.tracks
+    val recent = all.sortedByDescending { it.addedAt }.take(20)
+    val top = all.filter { it.plays > 0 }.sortedByDescending { it.plays }.take(10)
+    val forgotten = all.filter { it.plays > 0 }.sortedBy { it.lastPlayed }.take(10)
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("MySound", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
+            Row(
+                Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant).clickable(onClick = onDownload).padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                Text(tr("Download music"), style = MaterialTheme.typography.labelLarge)
+            }
+        }
+        if (all.isEmpty()) {
+            Empty(tr("Your library is empty."), tr("Add songs from this phone"), onAdd)
+        } else {
+            Shelf(vm, tr("Recently added"), recent, "r")
+            Shelf(vm, tr("Most played"), top, "p")
+            Shelf(vm, tr("Not played lately"), forgotten, "f")
+            Spacer(Modifier.height(16.dp))
         }
     }
 }
@@ -163,8 +205,13 @@ fun SongsScreen(vm: MainViewModel, onAdd: () -> Unit) {
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             Heading(tr("All songs"))
+            Text(tr("{0} songs", shown.size), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             OutlinedTextField(
-                value = query, onValueChange = { query = it }, singleLine = true,
+                value = query, onValueChange = { query = it }, singleLine = true, shape = CircleShape,
+                colors = OutlinedTextFieldDefaults.colors(
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant, focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    unfocusedBorderColor = Color.Transparent,
+                ),
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 placeholder = { Text(tr("Search your library…")) },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
@@ -322,7 +369,42 @@ fun SettingsScreen(vm: MainViewModel) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         Heading(tr("Appearance"))
 
-        Text(tr("Accent color"), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleMedium)
+        Text(tr("Theme"), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleMedium)
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Themes.chunked(2).forEachIndexed { r, pair ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    pair.forEachIndexed { c, th ->
+                        val idx = r * 2 + c
+                        val on = vm.themeIdx == idx
+                        Row(
+                            Modifier.weight(1f).clip(RoundedCornerShape(8.dp)).background(th.raised)
+                                .border(if (on) 2.dp else 1.dp, if (on) th.accent else Color.Gray.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                                .clickable(onClickLabel = tr("Use {0} theme", tr(th.name))) { vm.chooseTheme(idx) }
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Box(Modifier.size(14.dp).clip(CircleShape).background(th.outer).border(1.dp, Color.Gray.copy(alpha = 0.4f), CircleShape))
+                            Box(Modifier.size(14.dp).clip(CircleShape).background(th.base).border(1.dp, Color.Gray.copy(alpha = 0.4f), CircleShape))
+                            Box(Modifier.size(14.dp).clip(CircleShape).background(th.accent))
+                            Text(tr(th.name), color = if (th.base.luminance() > 0.4f) Color(0xFF14171C) else Color(0xFFF2F4F7), maxLines = 1)
+                        }
+                    }
+                    if (pair.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+
+        Text(tr("Layout"), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleMedium)
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Layouts.forEachIndexed { i, l -> FilterChip(selected = vm.layoutIdx == i, onClick = { vm.chooseLayout(i) }, label = { Text(tr(l.name)) }) }
+        }
+        Text(tr(Layouts[vm.layoutIdx].hint), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Switch(checked = vm.tintOn, onCheckedChange = vm::chooseTint)
+            Text(tr("Tint the player with the cover color"), Modifier.padding(start = 12.dp))
+        }
+
+        Text(tr("Custom accent color"), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleMedium)
         Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Accents.forEach { (name, color) ->
                 val selected = vm.accent == color.toArgb()
@@ -345,8 +427,8 @@ fun SettingsScreen(vm: MainViewModel) {
             Button(onClick = { pickImage.launch(arrayOf("image/*")) }) { Text(tr("Choose image")) }
             if (vm.bgVersion > 0 && vm.bgFile.exists()) OutlinedButton(onClick = vm::clearBackground) { Text(tr("Remove")) }
         }
-        Text(tr("Darken background: {0}%", (vm.bgDim * 100).toInt()), Modifier.padding(start = 16.dp, top = 12.dp), style = MaterialTheme.typography.bodyMedium)
-        Slider(value = vm.bgDim, onValueChange = vm::chooseBgDim, valueRange = 0f..0.9f, modifier = Modifier.padding(horizontal = 16.dp))
+        Text(tr("Panel opacity: {0}%", (vm.bgAlpha * 100).toInt()), Modifier.padding(start = 16.dp, top = 12.dp), style = MaterialTheme.typography.bodyMedium)
+        Slider(value = vm.bgAlpha, onValueChange = vm::chooseBgAlpha, valueRange = 0.15f..1f, modifier = Modifier.padding(horizontal = 16.dp))
 
         Text(tr("Background playback"), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.titleMedium)
         Text(

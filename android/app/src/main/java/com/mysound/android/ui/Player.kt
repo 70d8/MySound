@@ -1,6 +1,9 @@
 package com.mysound.android.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -22,6 +25,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -43,10 +47,21 @@ import com.mysound.android.MainViewModel
 import com.mysound.android.data.Track
 import com.mysound.android.data.fmt
 
+/** ปุ่มเล่น/หยุดวงกลมสีตัวอักษร ไอคอนสีพื้น เหมือนบนคอม */
+@Composable
+private fun playColors() = IconButtonDefaults.filledIconButtonColors(
+    containerColor = MaterialTheme.colorScheme.onBackground,
+    contentColor = MaterialTheme.colorScheme.background,
+)
+
 /** แถบเล่นเพลงเล็กเหนือแท็บล่าง: แตะเพื่อขยายเต็มจอ */
 @Composable
 fun MiniPlayer(vm: MainViewModel, t: Track, onOpen: () -> Unit) {
-    Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.94f)) {
+    Surface(
+        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+        shape = RoundedCornerShape(LocalLook.current.layout.radius.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    ) {
         Column {
             LinearProgressIndicator(
                 progress = { if (vm.durationMs > 0) (vm.positionMs.toFloat() / vm.durationMs).coerceIn(0f, 1f) else 0f },
@@ -62,7 +77,7 @@ fun MiniPlayer(vm: MainViewModel, t: Track, onOpen: () -> Unit) {
                     Text(t.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 IconButton(onClick = vm::prev) { Icon(Icons.Filled.SkipPrevious, contentDescription = tr("Previous")) }
-                IconButton(onClick = vm::toggle) {
+                FilledIconButton(onClick = vm::toggle, modifier = Modifier.size(40.dp), colors = playColors()) {
                     Icon(if (vm.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = if (vm.isPlaying) tr("Pause") else tr("Play"))
                 }
                 IconButton(onClick = vm::next) { Icon(Icons.Filled.SkipNext, contentDescription = tr("Next")) }
@@ -77,9 +92,12 @@ fun NowPlaying(vm: MainViewModel, t: Track, onClose: () -> Unit) {
     var lyricsOn by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(t.id, lyricsOn) { if (lyricsOn) vm.loadLyrics(t) }
 
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+    val tint = rememberTint(t.title, t.cover)
+    val base = MaterialTheme.colorScheme.background
+    val brush = if (LocalLook.current.tint) Brush.verticalGradient(0f to tint, 0.75f to base) else Brush.verticalGradient(listOf(base, base))
+    Surface(Modifier.fillMaxSize(), color = base) {
         Column(
-            Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 24.dp),
+            Modifier.fillMaxSize().background(brush).statusBarsPadding().navigationBarsPadding().padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -129,7 +147,7 @@ fun NowPlaying(vm: MainViewModel, t: Track, onClose: () -> Unit) {
                     Icon(Icons.Filled.Shuffle, contentDescription = tr("Shuffle"), tint = if (vm.shuffle) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 IconButton(onClick = vm::prev) { Icon(Icons.Filled.SkipPrevious, contentDescription = tr("Previous"), modifier = Modifier.size(36.dp)) }
-                FilledIconButton(onClick = vm::toggle, modifier = Modifier.size(72.dp)) {
+                FilledIconButton(onClick = vm::toggle, modifier = Modifier.size(72.dp), colors = playColors()) {
                     Icon(
                         if (vm.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                         contentDescription = if (vm.isPlaying) tr("Pause") else tr("Play"),
