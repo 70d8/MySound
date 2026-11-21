@@ -1,0 +1,75 @@
+:root {
+  /* ค่าสีของ MySound — ปรับได้ที่นี่ที่เดียว */
+  --bg-base: #0f1115;
+  --bg-raised: #181b21;
+  --bg-hover: #20242b;
+  --text: #f2f4f7;
+  --text-dim: #9aa3af;
+  --accent: #5eead4;
+  --on-accent: #04201c;
+  --bg-outer: #000;
+  --line: #ffffff14;
+  --line2: #ffffff21;
+  --line3: #ffffff2e;
+  --row-h: 56px;
+  --danger: #f87171;
+  --radius-panel: 8px;
+  --radius-card: 6px;
+  --gap: 8px;
+  --space: 16px;
+  --sidebar-w: 240px;
+  --right-w: 320px;
+  --npbar-h: 84px;
+  --progress-h: 4px;
+  font-family: Inter, 'Segoe UI', system-ui, sans-serif;
+  color: var(--text);
+  background: var(--bg-outer);
+  color-scheme: dark;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+}
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+input {
+  font: inherit;
+  color: inherit;
+}
+::-webkit-scrollbar {
+  width: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line2);
+  border-radius: 5px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ผู้ใช้ที่ตั้งค่าลดการเคลื่อนไหว: ตัดการขยับ เหลือแค่เปลี่ยนสี/ความโปร่งใส */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-property: opacity, color, background-color, border-color !important;
+    animation: none !important;
+  }
+  :active {
+    transform: none !important;
+  }
+}

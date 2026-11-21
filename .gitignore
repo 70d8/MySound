@@ -1,0 +1,11 @@
+# ไฟล์ใหญ่/ชั่วคราวที่ไม่ควรขึ้น GitHub
+*.zip
+*.spa
+node_modules/
+target/
+.svelte-kit/
+build/
+.gradle/
+android/**/build/
+*.jks
+local.properties

@@ -1,0 +1,78 @@
+name: Build Android
+
+# สร้าง APK ของแอป Android (โฟลเดอร์ android/ ในรีโป)
+# ทำงานเฉพาะเมื่อมีโปรเจกต์ android/ แล้ว (มี gradlew) จึงปลอดภัยที่จะวางไฟล์นี้ไว้ก่อน
+# Release: git tag android-v0.1.0 && git push origin android-v0.1.0
+on:
+  push:
+    branches: [main]
+    paths: ['android/**', '.github/workflows/build-android.yml']
+    tags: ['android-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    if: hashFiles('android/gradlew') != ''
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      # APK ต้องเซ็นชื่อก่อนติดตั้งได้ ถ้ายังไม่ตั้ง secrets จะได้ debug APK (ติดตั้งได้เหมือนกัน
+      # แต่ Obtainium จะอัปเดตข้ามเวอร์ชันได้ก็ต่อเมื่อเซ็นด้วยกุญแจเดิมทุกครั้ง)
+      - name: Decode signing key (optional)
+        id: key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release APK (signed)
+        if: steps.key.outputs.signed == 'true'
+        env:
+          KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Build debug APK (unsigned release key not set)
+        if: steps.key.outputs.signed != 'true'
+        run: ./gradlew assembleDebug --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mysound-android
+          path: |
+            android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: android/app/build/outputs/apk/**/*.apk
