@@ -346,7 +346,7 @@ fun SettingsScreen(vm: MainViewModel) {
             if (vm.bgVersion > 0 && vm.bgFile.exists()) OutlinedButton(onClick = vm::clearBackground) { Text(tr("Remove")) }
         }
         Text(tr("Darken background: {0}%", (vm.bgDim * 100).toInt()), Modifier.padding(start = 16.dp, top = 12.dp), style = MaterialTheme.typography.bodyMedium)
-        Slider(value = vm.bgDim, onValueChange = vm::setBgDim, valueRange = 0f..0.9f, modifier = Modifier.padding(horizontal = 16.dp))
+        Slider(value = vm.bgDim, onValueChange = vm::chooseBgDim, valueRange = 0f..0.9f, modifier = Modifier.padding(horizontal = 16.dp))
 
         Text(tr("Background playback"), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.titleMedium)
         Text(

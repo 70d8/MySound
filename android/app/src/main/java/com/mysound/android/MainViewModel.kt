@@ -67,7 +67,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var bgVersion by mutableIntStateOf(if (bgFile.exists()) 1 else 0); private set
     var bgDim by mutableFloatStateOf(prefs.getFloat("bgDim", 0.55f)); private set
 
-    fun setBgDim(v: Float) {
+    fun chooseBgDim(v: Float) {
         bgDim = v
         prefs.edit().putFloat("bgDim", v).apply()
     }
