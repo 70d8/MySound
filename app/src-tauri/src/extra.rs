@@ -310,74 +310,220 @@ fn whisper_exe(app: &AppHandle) -> Option<PathBuf> {
     wdir(app).ok().and_then(|d| find_file(&d, name, 3))
 }
 
-#[derive(serde::Serialize)]
-pub struct WhisperStatus { engine: bool, model: bool }
+// ---------- State machine การเตรียม AI ----------
+// แต่ละส่วน (engine = ตัวโปรแกรม, model = โมเดล) มีสถานะเดียวเท่านั้น:
+//   missing ──setup──▶ downloading ──▶ (engine: verifying ▶ extracting) ──▶ ready
+//      ▲                   │ ยกเลิก/เน็ตหลุด                   │ ไฟล์เสีย
+//      └── (ไม่มีไฟล์ค้าง) ◀┴──▶ paused (เก็บ .part ไว้โหลดต่อ)   └──▶ failed (ลบไฟล์เสีย เริ่มใหม่ได้)
+// Rust เป็นเจ้าของสถานะเดียว ส่ง event "whisper-state" ทุกครั้งที่เปลี่ยน; รันงานเตรียมได้ทีละงาน (running)
 
-#[tauri::command]
-pub fn whisper_status(app: AppHandle) -> Result<WhisperStatus, String> {
-    let m = wdir(&app)?.join("ggml-small.bin");
-    Ok(WhisperStatus { engine: whisper_exe(&app).is_some(), model: std::fs::metadata(m).map(|x| x.len() >= MODEL_MIN_BYTES).unwrap_or(false) })
+#[derive(Clone, serde::Serialize, Default, Debug, PartialEq)]
+pub struct Part { phase: String, done: u64, total: u64, error: Option<String> }
+#[derive(Clone, serde::Serialize, Default, Debug)]
+pub struct SetupState { engine: Part, model: Part, running: bool }
+
+#[derive(Default)]
+pub struct WSetup { st: Mutex<SetupState>, cancel: AtomicBool }
+
+#[derive(Clone, Copy)]
+enum Which { Engine, Model }
+
+const ENGINE_FILES: [&str; 2] = ["whisper-cli.exe", "ggml.dll"];
+
+fn engine_ready(app: &AppHandle) -> bool {
+    if !cfg!(windows) { return whisper_exe(app).is_some(); }
+    whisper_exe(app).and_then(|e| e.parent().map(|d| d.to_path_buf())).is_some_and(|d| ENGINE_FILES.iter().all(|f| d.join(f).is_file()))
+}
+fn model_path(app: &AppHandle) -> Result<PathBuf, String> { Ok(wdir(app)?.join("ggml-small.bin")) }
+/// ไฟล์โมเดล ggml ขึ้นต้นด้วยเลข magic "lmgg" และต้องมีขนาดครบ
+fn model_ok(p: &std::path::Path) -> bool {
+    use std::io::Read;
+    let Ok(m) = std::fs::metadata(p) else { return false };
+    let mut head = [0u8; 4];
+    m.len() >= MODEL_MIN_BYTES && std::fs::File::open(p).and_then(|mut f| f.read_exact(&mut head)).is_ok() && &head == b"lmgg"
+}
+fn part_len(p: &std::path::Path) -> u64 { std::fs::metadata(p.with_extension("part")).map(|m| m.len()).unwrap_or(0) }
+
+/// สถานะจริงจากไฟล์บนดิสก์ (ใช้ตอนไม่มีงานเตรียมค้างอยู่)
+fn scan_state(app: &AppHandle) -> SetupState {
+    let d = wdir(app).unwrap_or_default();
+    let part = |ready: bool, partial: u64| Part { phase: if ready { "ready" } else if partial > 0 { "paused" } else { "missing" }.into(), done: partial, total: 0, error: None };
+    let mp = d.join("ggml-small.bin");
+    SetupState { engine: part(engine_ready(app), part_len(&d.join("whisper-bin-x64.zip"))), model: part(model_ok(&mp), part_len(&mp)), running: false }
 }
 
-/// โหลดไฟล์ใหญ่ลง .part แล้วค่อยเปลี่ยนชื่อ พร้อมส่งความคืบหน้าเป็น event
-fn fetch_to(app: &AppHandle, url: &str, dest: &std::path::Path, stage: &str) -> Result<(), String> {
+fn set_part(app: &AppHandle, w: Which, f: impl FnOnce(&mut Part)) {
+    let s = app.state::<WSetup>();
+    let snap = {
+        let Ok(mut g) = s.st.lock() else { return };
+        f(match w { Which::Engine => &mut g.engine, Which::Model => &mut g.model });
+        g.clone()
+    };
+    let _ = app.emit("whisper-state", snap);
+}
+
+/// โหลดต่อจากไฟล์ .part เดิมได้ (HTTP Range); ยกเลิกได้ระหว่างโหลด (เก็บ .part ไว้)
+fn fetch_resume(app: &AppHandle, w: Which, url: &str, dest: &std::path::Path) -> Result<(), String> {
     use std::io::{Read, Write};
-    let mut r = ureq::get(url).header("User-Agent", "MySound").call().map_err(|e| format!("โหลดไม่ได้: {e}"))?;
-    let total: u64 = r.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok()).unwrap_or(0);
     let part = dest.with_extension("part");
-    let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
-    let mut rd = r.body_mut().with_config().limit(2_000_000_000).reader();
+    let have = part_len(dest);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(std::time::Duration::from_secs(20)))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(30)))
+        .build()
+        .into();
+    let mut req = agent.get(url).header("User-Agent", "MySound");
+    if have > 0 { req = req.header("Range", &format!("bytes={have}-")); }
+    let mut r = match req.call() {
+        Ok(r) => r,
+        Err(ureq::Error::StatusCode(416)) => { std::fs::rename(&part, dest).map_err(|e| e.to_string())?; return Ok(()); } // .part ครบแล้ว
+        Err(ureq::Error::StatusCode(c)) => return Err(format!("HTTP {c}")),
+        Err(e) => return Err(format!("เชื่อมต่อไม่ได้: {e}")),
+    };
+    let len: u64 = r.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let resumed = r.status().as_u16() == 206;
+    let start = if resumed { have } else { 0 };
+    let total = if len > 0 { start + len } else { 0 };
+    let mut f = std::fs::OpenOptions::new().create(true).write(true).append(resumed).truncate(!resumed).open(&part).map_err(|e| e.to_string())?;
+    let mut rd = r.body_mut().with_config().limit(3_000_000_000).reader();
     let mut buf = vec![0u8; 1 << 16];
-    let (mut done, mut last) = (0u64, 0u64);
+    let (mut done, mut last) = (start, std::time::Instant::now());
+    set_part(app, w, |p| { p.phase = "downloading".into(); p.done = done; p.total = total; p.error = None; });
+    let cancel = &app.state::<WSetup>().cancel;
     loop {
-        let n = rd.read(&mut buf).map_err(|e| format!("โหลดขาดกลางทาง: {e}"))?;
+        if cancel.load(Ordering::SeqCst) { return Err("cancelled".into()); }
+        let n = rd.read(&mut buf).map_err(|e| format!("เน็ตหลุดระหว่างโหลด: {e}"))?;
         if n == 0 { break; }
-        f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        f.write_all(&buf[..n]).map_err(|e| format!("เขียนไฟล์ไม่ได้ (พื้นที่เต็ม?): {e}"))?;
         done += n as u64;
-        if done - last > 2_000_000 { last = done; let _ = app.emit("whisper-setup", serde_json::json!({ "stage": stage, "done": done, "total": total })); }
+        if last.elapsed().as_millis() > 250 { last = std::time::Instant::now(); set_part(app, w, |p| p.done = done); }
     }
+    f.flush().map_err(|e| e.to_string())?;
     drop(f);
-    if total > 0 && done < total { return Err("โหลดไม่ครบ ลองใหม่อีกครั้ง".into()); }
+    if total > 0 && done < total { return Err("โหลดไม่ครบ".into()); }
     std::fs::rename(&part, dest).map_err(|e| e.to_string())
 }
 
-/// เตรียมตัวโปรแกรมและโมเดลให้พร้อม (โหลดเฉพาะที่ยังไม่มี)
-#[tauri::command]
-pub async fn whisper_setup(app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let d = wdir(&app)?;
-        if whisper_exe(&app).is_none() {
-            if !cfg!(windows) { return Err("ตอนนี้รองรับเฉพาะ Windows".into()); }
-            let zip = d.join("whisper-bin-x64.zip");
-            let mut last = String::new();
-            let ok = WHISPER_ZIPS.iter().any(|u| match fetch_to(&app, u, &zip, "engine") {
-                Ok(()) => true,
-                Err(e) => { last = e; false }
-            });
-            if !ok { return Err(format!("โหลดตัวโปรแกรม whisper ไม่ได้ ({last})")); }
-            // Windows 10 ขึ้นไปมี tar.exe ที่แตกไฟล์ zip ได้
-            let out = tool("tar").arg("-xf").arg(&zip).arg("-C").arg(&d).output().map_err(|e| format!("แตกไฟล์ไม่ได้: {e}"))?;
-            let _ = std::fs::remove_file(&zip);
-            if !out.status.success() || whisper_exe(&app).is_none() { return Err("แตกไฟล์ whisper ไม่สำเร็จ".into()); }
+/// ลองซ้ำเมื่อเน็ตสะดุด (ต่อจากที่โหลดค้างไว้) แต่ไม่ลองซ้ำเมื่อโดนปฏิเสธ (HTTP 4xx) หรือผู้ใช้ยกเลิก
+fn fetch_retry(app: &AppHandle, w: Which, url: &str, dest: &std::path::Path) -> Result<(), String> {
+    let mut last = String::new();
+    for i in 0..4u64 {
+        if i > 0 { std::thread::sleep(std::time::Duration::from_secs(i * 2)); }
+        match fetch_resume(app, w, url, dest) {
+            Ok(()) => return Ok(()),
+            Err(e) if e == "cancelled" || e.starts_with("HTTP 4") => return Err(e),
+            Err(e) => last = e,
         }
-        let m = d.join("ggml-small.bin");
-        if std::fs::metadata(&m).map(|x| x.len() < MODEL_MIN_BYTES).unwrap_or(true) {
-            fetch_to(&app, WHISPER_MODEL, &m, "model")?;
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+        if app.state::<WSetup>().cancel.load(Ordering::SeqCst) { return Err("cancelled".into()); }
+    }
+    Err(last)
 }
 
+fn setup_engine(app: &AppHandle) -> Result<(), String> {
+    if engine_ready(app) { return Ok(()); }
+    if !cfg!(windows) { return Err("ตอนนี้รองรับเฉพาะ Windows".into()); }
+    let d = wdir(app)?;
+    let zip = d.join("whisper-bin-x64.zip");
+    let mut last = String::new();
+    // ลองทีละลิงก์ (ลิงก์ที่ 404 ข้ามไปลิงก์ถัดไป; .part ของลิงก์อื่นใช้ต่อกันไม่ได้ จึงลบ)
+    for u in WHISPER_ZIPS {
+        match fetch_retry(app, Which::Engine, u, &zip) {
+            Ok(()) => { last.clear(); break; }
+            Err(e) if e == "cancelled" => return Err(e),
+            Err(e) => { last = e; let _ = std::fs::remove_file(zip.with_extension("part")); }
+        }
+    }
+    if !last.is_empty() { return Err(format!("โหลดตัวโปรแกรมไม่ได้ ({last})")); }
+    set_part(app, Which::Engine, |p| p.phase = "verifying".into());
+    if !std::fs::read(&zip).map(|b| b.starts_with(b"PK")).unwrap_or(false) {
+        let _ = std::fs::remove_file(&zip);
+        return Err("ไฟล์ตัวโปรแกรมเสีย ลองใหม่".into());
+    }
+    set_part(app, Which::Engine, |p| p.phase = "extracting".into());
+    let out = d.join("engine");
+    let _ = std::fs::remove_dir_all(&out); // ล้างของที่แตกค้างไว้ไม่ครบ
+    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    let r = tool("tar").arg("-xf").arg(&zip).arg("-C").arg(&out).output().map_err(|e| format!("แตกไฟล์ไม่ได้: {e}"))?;
+    let _ = std::fs::remove_file(&zip);
+    if !r.status.success() || !engine_ready(app) {
+        let _ = std::fs::remove_dir_all(&out);
+        return Err("แตกไฟล์ตัวโปรแกรมได้ไม่ครบ ลองใหม่".into());
+    }
+    Ok(())
+}
+
+fn setup_model(app: &AppHandle) -> Result<(), String> {
+    let m = model_path(app)?;
+    if model_ok(&m) { return Ok(()); }
+    let _ = std::fs::remove_file(&m); // ไฟล์ไม่สมบูรณ์จากเวอร์ชันก่อน
+    fetch_retry(app, Which::Model, WHISPER_MODEL, &m)?;
+    set_part(app, Which::Model, |p| p.phase = "verifying".into());
+    if !model_ok(&m) {
+        let _ = std::fs::remove_file(&m);
+        return Err("ไฟล์โมเดลเสีย ลองใหม่".into());
+    }
+    Ok(())
+}
+
+fn finish_part(app: &AppHandle, w: Which, r: &Result<(), String>) {
+    let path = match w { Which::Engine => wdir(app).map(|d| d.join("whisper-bin-x64.zip")), Which::Model => model_path(app) };
+    let partial = path.map(|p| part_len(&p)).unwrap_or(0);
+    set_part(app, w, |p| match r {
+        Ok(()) => { p.phase = "ready".into(); p.error = None; p.done = p.total; }
+        Err(e) if e == "cancelled" => { p.phase = if partial > 0 { "paused" } else { "missing" }.into(); p.error = None; p.done = partial; }
+        Err(e) => { p.phase = if partial > 0 { "paused" } else { "failed" }.into(); p.error = Some(e.clone()); p.done = partial; }
+    });
+}
+
+/// สถานะปัจจุบัน (ถ้าไม่มีงานค้าง: อ่านจากดิสก์ใหม่ แต่เก็บข้อความ error ล่าสุดไว้)
+#[tauri::command]
+pub fn whisper_state(app: AppHandle) -> SetupState {
+    let s = app.state::<WSetup>();
+    let Ok(mut g) = s.st.lock() else { return scan_state(&app) };
+    if g.running { return g.clone(); }
+    let (ee, me) = (g.engine.error.clone(), g.model.error.clone());
+    *g = scan_state(&app);
+    if g.engine.phase != "ready" { g.engine.error = ee; }
+    if g.model.phase != "ready" { g.model.error = me; }
+    g.clone()
+}
+
+/// เริ่มเตรียม (ถ้ายังไม่มีงานรันอยู่) แล้วคืนทันที; ความคืบหน้า/ผลลัพธ์ส่งทาง event "whisper-state"
+#[tauri::command]
+pub fn whisper_setup(app: AppHandle) -> SetupState {
+    let s = app.state::<WSetup>();
+    {
+        let Ok(mut g) = s.st.lock() else { return SetupState::default() };
+        if g.running { return g.clone(); }
+        g.running = true;
+    }
+    s.cancel.store(false, Ordering::SeqCst);
+    let a = app.clone();
+    std::thread::spawn(move || {
+        let r1 = setup_engine(&a);
+        finish_part(&a, Which::Engine, &r1);
+        if r1.is_ok() {
+            let r2 = setup_model(&a);
+            finish_part(&a, Which::Model, &r2);
+        }
+        let snap = { let s = a.state::<WSetup>(); let mut g = s.st.lock().unwrap(); g.running = false; g.clone() };
+        let _ = a.emit("whisper-state", snap);
+    });
+    app.state::<WSetup>().st.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn whisper_setup_cancel(app: AppHandle) { app.state::<WSetup>().cancel.store(true, Ordering::SeqCst); }
+
 #[derive(serde::Serialize, Debug, PartialEq)]
-pub struct WWord { ms: i64, text: String }
+pub struct WWord { ms: i64, end: i64, text: String }
 
 pub fn parse_whisper_json(v: &serde_json::Value) -> Vec<WWord> {
     v["transcription"].as_array().map(|a| a.iter().filter_map(|s| {
         let text = s["text"].as_str()?.to_string();
         if text.trim().is_empty() || text.trim_start().starts_with('[') { return None; } // [Music] ฯลฯ
-        Some(WWord { ms: s["offsets"]["from"].as_i64()?, text })
+        let ms = s["offsets"]["from"].as_i64()?;
+        Some(WWord { ms, end: s["offsets"]["to"].as_i64().unwrap_or(ms), text })
     }).collect()).unwrap_or_default()
 }
 
@@ -386,6 +532,7 @@ pub fn parse_whisper_json(v: &serde_json::Value) -> Vec<WWord> {
 pub async fn whisper_run(app: AppHandle, state: tauri::State<'_, Whisper>, path: String, lang: String) -> Result<Vec<WWord>, String> {
     let cell = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        if !engine_ready(&app) || !model_ok(&model_path(&app)?) { return Err("AI ยังโหลดไม่ครบ ลองกดจับเวลาอีกครั้งเพื่อโหลดต่อ".into()); }
         let exe = whisper_exe(&app).ok_or("ยังไม่ได้ติดตั้ง whisper")?;
         let d = wdir(&app)?;
         let model = d.join("ggml-small.bin");
@@ -395,34 +542,51 @@ pub async fn whisper_run(app: AppHandle, state: tauri::State<'_, Whisper>, path:
         let base = std::env::temp_dir().join(format!("mysound-w-{millis}"));
         let o = std::ffi::OsStr::new;
         ffmpeg(&[o("-i"), o(&path), o("-vn"), o("-ar"), o("16000"), o("-ac"), o("1"), o("-c:a"), o("pcm_s16le"), wav.as_os_str()])?;
-        let threads = std::thread::available_parallelism().map(|n| n.get().saturating_sub(1).max(1)).unwrap_or(4).to_string();
-        let mut cmd = Command::new(&exe);
-        cmd.arg("-m").arg(&model).arg("-f").arg(&wav).args(["-l", &lang, "-t", &threads, "-ml", "1", "-oj", "-pp", "-of"]).arg(&base)
-            .stdout(Stdio::null()).stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
-        let mut child = cmd.spawn().map_err(|e| format!("เปิด whisper ไม่ได้: {e}"))?;
-        let err = child.stderr.take();
-        *cell.lock().map_err(|e| e.to_string())? = Some(child);
-        let mut tail = String::new();
-        if let Some(err) = err {
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
-                if let Some(p) = line.split("progress =").nth(1).and_then(|x| x.trim().trim_end_matches('%').trim().parse::<u32>().ok()) {
-                    let _ = app.emit("whisper-progress", p);
-                } else if !line.trim().is_empty() { tail = line; }
+        let threads = std::thread::available_parallelism().map(|n| n.get().saturating_sub(1).clamp(1, 8)).unwrap_or(4).to_string();
+        // รอบแรก: greedy + เวลาระดับโทเค็น; ถ้าพัง ลองแบบเวลาระดับช่วง (บาง CPU/รุ่นล่มกับ -ml 1)
+        let attempts: [&[&str]; 2] = [&["-bs", "1", "-bo", "1", "-ml", "1"], &["-bs", "1", "-bo", "1", "-nf"]];
+        let mut log = String::new();
+        let mut result: Option<serde_json::Value> = None;
+        let mut last_err = String::new();
+        for (k, extra) in attempts.iter().enumerate() {
+            let mut cmd = Command::new(&exe);
+            cmd.arg("-m").arg(&model).arg("-f").arg(&wav).args(["-l", &lang, "-t", &threads]).args(*extra).args(["-oj", "-pp", "-of"]).arg(&base)
+                .current_dir(exe.parent().unwrap_or(&d)) // ให้หา DLL ข้างตัวโปรแกรมเจอ
+                .stdout(Stdio::null()).stderr(Stdio::piped());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000);
             }
+            let mut child = cmd.spawn().map_err(|e| format!("เปิด whisper ไม่ได้: {e}"))?;
+            let err = child.stderr.take();
+            *cell.lock().map_err(|e| e.to_string())? = Some(child);
+            log.push_str(&format!("--- attempt {} {:?}\n", k + 1, extra));
+            if let Some(err) = err {
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    if let Some(p) = line.split("progress =").nth(1).and_then(|x| x.trim().trim_end_matches('%').trim().parse::<u32>().ok()) {
+                        let _ = app.emit("whisper-progress", p);
+                    } else { log.push_str(&line); log.push('\n'); }
+                }
+            }
+            let status = cell.lock().map_err(|e| e.to_string())?.take().map(|mut c| c.wait());
+            let json = base.with_extension("json");
+            let text = std::fs::read_to_string(&json);
+            let _ = std::fs::remove_file(&json);
+            match status {
+                None => { let _ = std::fs::remove_file(&wav); return Err("ยกเลิกแล้ว".into()); }
+                Some(Ok(st)) if st.success() => {
+                    if let Some(v) = text.ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) { result = Some(v); break; }
+                    last_err = "whisper ไม่ได้สร้างไฟล์ผลลัพธ์".into();
+                }
+                Some(Ok(st)) => last_err = format!("รหัส {}", st.code().map_or("?".into(), |c| format!("{c} (0x{:08X})", c as u32))),
+                Some(Err(e)) => last_err = e.to_string(),
+            }
+            log.push_str(&format!("=> {last_err}\n"));
         }
-        let status = cell.lock().map_err(|e| e.to_string())?.take().map(|mut c| c.wait());
         let _ = std::fs::remove_file(&wav);
-        let json = base.with_extension("json");
-        let ok = matches!(status, Some(Ok(s)) if s.success());
-        let text = std::fs::read_to_string(&json);
-        let _ = std::fs::remove_file(&json);
-        if !ok { return Err(if status.is_none() { "ยกเลิกแล้ว".into() } else { format!("whisper ทำงานไม่สำเร็จ: {tail}") }); }
-        let v: serde_json::Value = serde_json::from_str(&text.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        let _ = std::fs::write(d.join("last-run.log"), &log); // เก็บไว้ดูสาเหตุ
+        let v = result.ok_or_else(|| format!("whisper ทำงานไม่สำเร็จ ({last_err}) ดู log ที่ {}", d.join("last-run.log").display()))?;
         Ok(parse_whisper_json(&v))
     })
     .await

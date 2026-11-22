@@ -42,6 +42,7 @@ struct Progress {
     pct: f32,
     title: Option<String>,
     state: &'static str,
+    item: Option<ytdlp::Item>,
 }
 
 /// YouTube ขอให้ล็อกอินยืนยันว่าไม่ใช่บอท: ยืมคุกกี้จากเบราว์เซอร์ที่ผู้ใช้เลือก หรือจากไฟล์ cookies.txt ("file:พาธ")
@@ -64,7 +65,7 @@ fn run_download(app: &AppHandle, id: u64, url: &str, playlist: bool, cookies: &s
         .args(["-f", "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio"])
         .args(["-o", &format!("{}/%(id)s.%(ext)s", music.display())])
         .args(["--progress-template", &format!("download:{} %(progress._percent_str)s", ytdlp::P_PROGRESS)])
-        .args(["--print", &format!("before_dl:{}\t%(title)s", ytdlp::P_TITLE)])
+        .args(["--print", &format!("before_dl:{}\t%(playlist_index)s\t%(n_entries)s\t%(playlist_title)s\t%(title)s", ytdlp::P_TITLE)])
         .args([
             "--print",
             &format!("after_move:{}\t%(title)s\t%(uploader)s\t%(album)s\t%(duration)s\t%(playlist_title)s\t%(webpage_url)s\t%(thumbnail)s\t%(filepath)s", ytdlp::P_DONE),
@@ -95,11 +96,11 @@ fn run_download(app: &AppHandle, id: u64, url: &str, playlist: bool, cookies: &s
     // อ่าน stderr ในเธรดแยก ไม่งั้นท่อเต็มแล้วโปรเซสค้าง
     let err_pipe = child.stderr.take().ok_or("no stderr")?;
     let err_thread = std::thread::spawn(move || {
-        BufReader::new(err_pipe).lines().map_while(Result::ok).filter(|l| l.contains("ERROR")).last()
+        BufReader::new(err_pipe).lines().map_while(Result::ok).filter(|l| l.contains("ERROR")).map(|l| ytdlp::short_error(&l)).collect::<Vec<_>>()
     });
 
-    let emit = |pct, title: Option<String>, state| {
-        let _ = app.emit("dl-progress", Progress { id, pct, title, state });
+    let emit = |pct, item: Option<ytdlp::Item>, state| {
+        let _ = app.emit("dl-progress", Progress { id, pct, title: item.as_ref().map(|i| i.title.clone()), state, item });
     };
     let mut count = 0;
     for line in BufReader::new(child.stdout.take().ok_or("no stdout")?).lines().map_while(Result::ok) {
@@ -126,12 +127,16 @@ fn run_download(app: &AppHandle, id: u64, url: &str, playlist: bool, cookies: &s
         }
     }
     let status = child.wait().map_err(|e| e.to_string())?;
-    let last_err = err_thread.join().ok().flatten();
+    let errs = err_thread.join().unwrap_or_default();
+    let _ = status;
+    // เพลงในเพลย์ลิสต์ที่โหลดไม่ได้ (ถูกลบ/ส่วนตัว/บล็อกประเทศ) แจ้งให้หน้าจอรู้ ไม่เงียบหาย
+    if count > 0 && !errs.is_empty() {
+        let _ = app.emit("dl-skip", (id, errs.len(), errs.last().cloned().unwrap_or_default()));
+    }
     if count > 0 {
         Ok(count) // ถ้ามีบางเพลงในเพลย์ลิสต์พัง แต่ได้อย่างน้อย 1 เพลงก็ถือว่าสำเร็จ
     } else {
-        let _ = status;
-        Err(last_err.unwrap_or_else(|| "ดาวน์โหลดไม่สำเร็จ".into()))
+        Err(errs.last().cloned().unwrap_or_else(|| "ดาวน์โหลดไม่สำเร็จ".into()))
     }
 }
 
@@ -934,6 +939,7 @@ pub fn run() {
         .manage(Discord::default())
         .manage(extra::Remote::default())
         .manage(extra::Whisper::default())
+        .manage(extra::WSetup::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
@@ -946,7 +952,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![read_library, write_library, download, genius_cover, import_cover, missing_files, delete_files, tool_version, ytdlp_update, process_audio, export_library, lyrics, discord_update, discord_clear, check_update, install_update, storage_info, relink, lyrics_cache_read, lyrics_cache_write, write_lrc_files, search_online, read_text_file, launch_files, tray_tooltip, import_files, scan_folder, save_text, load_text, extra::open_url, extra::save_png, extra::yt_info, extra::cut_audio, extra::convert_mp3, extra::import_bg_video, extra::lastfm_token, extra::lastfm_session, extra::lastfm_track, extra::remote_start, extra::remote_stop, extra::remote_push, extra::whisper_status, extra::whisper_setup, extra::whisper_run, extra::whisper_cancel])
+        .invoke_handler(tauri::generate_handler![read_library, write_library, download, genius_cover, import_cover, missing_files, delete_files, tool_version, ytdlp_update, process_audio, export_library, lyrics, discord_update, discord_clear, check_update, install_update, storage_info, relink, lyrics_cache_read, lyrics_cache_write, write_lrc_files, search_online, read_text_file, launch_files, tray_tooltip, import_files, scan_folder, save_text, load_text, extra::open_url, extra::save_png, extra::yt_info, extra::cut_audio, extra::convert_mp3, extra::import_bg_video, extra::lastfm_token, extra::lastfm_session, extra::lastfm_track, extra::remote_start, extra::remote_stop, extra::remote_push, extra::whisper_state, extra::whisper_setup, extra::whisper_setup_cancel, extra::whisper_run, extra::whisper_cancel])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

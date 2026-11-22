@@ -8,9 +8,13 @@ pub const P_DONE: &str = "MS_DONE";
 #[derive(Debug, PartialEq)]
 pub enum Line {
     Progress(f32),
-    Title(String),
+    Title(Item),
     Done(Done),
 }
+
+/// เพลงที่กำลังจะโหลด: ลำดับในเพลย์ลิสต์ (idx/n) ถ้าเป็นเพลย์ลิสต์
+#[derive(Debug, PartialEq, Clone, serde::Serialize)]
+pub struct Item { pub idx: u32, pub n: u32, pub list: Option<String>, pub title: String }
 
 #[derive(Debug, PartialEq, Clone, serde::Serialize)]
 pub struct Done {
@@ -37,7 +41,10 @@ pub fn parse(line: &str) -> Option<Line> {
         return Some(Line::Progress(pct.clamp(0.0, 100.0)));
     }
     if let Some(rest) = line.strip_prefix(P_TITLE) {
-        return Some(Line::Title(field(rest.trim_start_matches('\t'))?));
+        // MS_TITLE \t playlist_index \t n_entries \t playlist_title \t title
+        let f: Vec<&str> = rest.trim_start_matches('\t').splitn(4, '\t').collect();
+        let num = |i: usize| f.get(i).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
+        return Some(Line::Title(Item { idx: num(0), n: num(1), list: f.get(2).and_then(|v| field(v)), title: field(f.get(3)?)? }));
     }
     if let Some(rest) = line.strip_prefix(P_DONE) {
         // MS_DONE \t title \t uploader \t album \t duration \t playlist \t url \t thumbnail \t filepath
@@ -62,6 +69,16 @@ pub fn parse(line: &str) -> Option<Line> {
 
 
 /// ทำชื่อวิดีโอ YouTube ให้เป็นคำค้นที่ Genius เข้าใจ (ตัดวงเล็บ, official video, lyrics ฯลฯ)
+/// ตัด "ERROR: [youtube] abc123: " ออกให้เหลือเหตุผล
+pub fn short_error(line: &str) -> String {
+    let mut s = line.trim().trim_start_matches("ERROR:").trim();
+    if s.starts_with('[') {
+        if let Some(i) = s.find("]") { s = s[i + 1..].trim(); }
+        if let Some((id, rest)) = s.split_once(": ") { if !id.contains(' ') { s = rest; } }
+    }
+    s.chars().take(200).collect()
+}
+
 pub fn clean_query(title: &str, uploader: &str) -> String {
     const NOISE: [&str; 12] = ["official", "video", "audio", "lyrics", "lyric", "mv", "m/v", "hd", "hq", "4k", "visualizer", "music"];
     let mut depth = 0;
@@ -126,7 +143,9 @@ mod tests {
 
     #[test]
     fn title() {
-        assert_eq!(parse("MS_TITLE\tเพลง A"), Some(Line::Title("เพลง A".into())));
+        assert_eq!(parse("MS_TITLE\t3\t12\tรวมเพลง\tเพลง A"), Some(Line::Title(Item { idx: 3, n: 12, list: Some("รวมเพลง".into()), title: "เพลง A".into() })));
+        assert_eq!(parse("MS_TITLE\tNA\tNA\tNA\tเพลง B"), Some(Line::Title(Item { idx: 0, n: 0, list: None, title: "เพลง B".into() })));
+        assert_eq!(parse("MS_TITLE\t1\t2\tx\t"), None);
         assert_eq!(parse("MS_TITLE\tNA"), None);
     }
 

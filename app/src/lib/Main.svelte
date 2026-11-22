@@ -27,6 +27,8 @@
   let library = $state<Track[]>([]);
   let playlists = $state<Playlist[]>([]);
   let loaded = $state(false); // กันเขียนทับไฟล์ด้วยคลังว่างก่อนอ่านเสร็จ
+  const TOOL_TABS = [['gen', 'ทั่วไป'], ['snd', 'เสียง'], ['lib', 'คลังเพลง'], ['lyr', 'เนื้อเพลง'], ['net', 'เชื่อมต่อ'], ['sys', 'ระบบ']] as const;
+  let toolTab = $state<(typeof TOOL_TABS)[number][0]>('gen');
   let view = $state('home'); // home | songs | download | tools | pl:<id> | auto:<id>
   let query = $state('');
   let current = $state<Track | null>(null);
@@ -41,6 +43,7 @@
   let compact = $state(false);
   let selected = $state<number | null>(null);
   let notice = $state('');
+  let badTrack = $state<Track | null>(null); // เพลงที่เล่นไม่ได้: toast มีปุ่มลบ
   let missing = $state<number[]>([]);
   let audio = $state<HTMLAudioElement>(); // เด็คที่กำลังเล่นอยู่ (มี 2 ตัวไว้ครอสเฟด)
   let decks = $state<HTMLAudioElement[]>([]);
@@ -266,12 +269,22 @@
       .then((m) => (missing = library.filter((t) => m.includes(t.path)).map((t) => t.id)))
       .catch(() => {});
     refreshTools();
-    await listen<{ id: number; pct: number; title: string | null }>('dl-progress', (e) => {
+    await listen<{ id: number; pct: number; title: string | null; item: { idx: number; n: number; list: string | null; title: string } | null }>('dl-progress', (e) => {
       const d = downloads.find((x) => x.id === e.payload.id);
-      if (!d) return;
-      if (e.payload.title && !d.playlist) d.title = e.payload.title;
-      if (e.payload.pct > 0) d.pct = e.payload.pct;
+      if (!d || d.state === 'done' || d.state === 'failed') return; // เหตุการณ์ที่มาช้าหลังงานจบ ไม่ย้อนสถานะ
+      const it = e.payload.item;
+      if (it) {
+        d.cur = it.title;
+        if (it.n > 0) { d.idx = it.idx; d.n = it.n; }
+        if (it.list && d.playlist) d.title = it.list;
+      } else if (e.payload.title && !d.playlist) d.title = e.payload.title;
+      // เพลย์ลิสต์: แถบรวมทั้งลิสต์ (เพลงที่เสร็จแล้ว + ความคืบหน้าเพลงนี้) ไม่วิ่งวนกลับ 0 ทุกเพลง
+      if (e.payload.pct > 0) d.pct = d.n ? Math.min(99, (((d.idx ?? 1) - 1 + e.payload.pct / 100) / d.n) * 100) : e.payload.pct;
       d.state = e.payload.pct >= 100 ? 'converting' : 'downloading';
+    });
+    await listen<[number, number, string]>('dl-skip', (e) => {
+      const d = downloads.find((x) => x.id === e.payload[0]);
+      if (d) { d.skipped = e.payload[1]; d.msg = tr('โหลดไม่ได้ {0} เพลง: {1}', e.payload[1], tr(e.payload[2])); }
     });
     await listen<[number, Done]>('dl-done', (e) => onTrackDone(...e.payload));
     await listen<{ cmd: string; v?: number }>('np-cmd', (e) => {
@@ -314,7 +327,7 @@
       history.unshift({ id: t.id, at: Date.now() });
       if (history.length > 200) history.length = 200;
     }
-    notice = '';
+    notice = ''; badTrack = null;
     t.plays += 1;
     t.last = new Date().toISOString().slice(0, 10);
   }
@@ -327,7 +340,9 @@
     plan = null;
     beginTrack(t, list, keepSrc);
     if (fx) { fx.solo(activeIdx); decks[1 - activeIdx]?.pause(); xfading = false; }
+    clearInterval(fadeTimer); // ไม่งั้นเฟดออกของการกดหยุดค้างอยู่ แล้วไปสั่งหยุดเพลงใหม่
     fadeMul = 1;
+    delete audio.dataset.src; // เด็คนี้ถูกใช้โหลดเพลงอื่นแล้ว ป้ายพรีโหลดเดิมใช้ไม่ได้
     audio.src = convertFileSrc(t.path);
     audio.play().catch(() => {});
   }
@@ -384,7 +399,7 @@
     // กดข้ามเองก่อนเล่นถึง 30% = นับว่าข้าม (ไว้หาเพลงที่ไม่ค่อยอยากฟัง)
     if (user !== false && audio && current.dur > 30 && audio.currentTime < current.dur * 0.3) current.skips = (current.skips ?? 0) + 1;
     const t = peekNext();
-    if (!t) { playing = false; return; }
+    if (!t) { if (user === false) playing = false; return; } // กดข้ามเองแต่ไม่มีเพลงถัดไป: เพลงเดิมเล่นต่อ ไม่ให้ปุ่มเพี้ยน
     const fromQ = !!plan?.q;
     plan = null;
     if (fromQ) uq.shift();
@@ -591,11 +606,15 @@
   function prev() {
     if (!current || !audio) return;
     if (audio.currentTime > 3) audio.currentTime = 0;
-    else play(queue[queue.length - 1] ?? current, srcIds ? srcTracks : undefined);
+    else {
+      const h = shuffle ? library.find((x) => x.id === history[1]?.id && !missing.includes(x.id)) : undefined; // สุ่มอยู่: ย้อนไปเพลงที่เพิ่งฟัง
+      if (h) { history.shift(); play(h, srcIds ? srcTracks : undefined); }
+      else play(queue[queue.length - 1] ?? current, srcIds ? srcTracks : undefined);
+    }
   }
   function ended() {
     if (current) current.resume = 0;
-    if (stopAfter > 0 && --stopAfter === 0) return; // ตั้งให้หยุดหลังจบเพลง
+    if (stopAfter > 0 && --stopAfter === 0) { audio?.pause(); return; } // ตั้งให้หยุดหลังจบเพลง (ข้ามท้ายเพลงมาแล้วเสียงยังเดินอยู่ ต้องหยุดเอง)
     abA = abB = null;
     if (repeat && current) return play(current, srcIds ? srcTracks : undefined);
     next(false);
@@ -605,7 +624,7 @@
     pos = audio.currentTime;
     if (abB !== null && pos >= abB) { audio.currentTime = abA ?? 0; return; }
     const d = audio.duration;
-    if (current?.skipEnd && isFinite(d) && !skipFired && pos >= d - current.skipEnd - 0.05 && !(xfade > 0 && fx)) {
+    if (current?.skipEnd && isFinite(d) && !skipFired && pos >= d - current.skipEnd - 0.05 && !((xfade > 0 || gapless) && fx)) {
       skipFired = true; // ข้ามความเงียบท้ายเพลง
       ended();
       return;
@@ -689,9 +708,11 @@
     return () => cancelAnimationFrame(raf);
   });
   // ถ้า WebView ไม่ยอมให้อ่านไฟล์แบบ CORS: ปิดคลื่นเสียง แล้วโหลดเพลงเดิมต่อโดยไม่ใช้ CORS
+  let corsTried: { viz: boolean } | null = null;
   function audioError() {
     if (!fx && audio?.crossOrigin && current) {
       const at = audio.currentTime;
+      corsTried = { viz: look.viz };
       audio.removeAttribute('crossorigin');
       look.viz = false;
       pendingSeek = at;
@@ -700,12 +721,35 @@
       return;
     }
     playing = false;
+    // ลองแบบไม่ใช้ CORS แล้วยังพังอีก = ปัญหาอยู่ที่ไฟล์ ไม่ใช่ WebView: คืนค่าที่เราเพิ่งปิดไป
+    if (corsTried && audio) { audio.crossOrigin = 'anonymous'; look.viz = corsTried.viz; corsTried = null; }
+    const bad = current;
+    if (bad) invoke<string[]>('missing_files', { paths: [bad.path] }).then((m) => { if (m.length && !missing.includes(bad.id)) missing.push(bad.id); }).catch(() => {});
+    badTrack = current;
     notice = tr('เล่นไฟล์นี้ไม่ได้ ไฟล์อาจถูกย้ายหรือลบ');
   }
 
   let fading = false;
   // ระดับเสียงจริง = ที่ผู้ใช้ตั้ง × ตัวคูณปรับเสียงรายเพลง (ลดเพลงที่ดังเกิน)
-  const gain = $derived((normalize ? normGain(current?.lufs) : 1) * 10 ** ((current?.gainDb ?? 0) / 20));
+  // เพลงที่ยังไม่เคยวัดความดัง: เริ่มเบาไว้ก่อน (-6dB) แล้วค่อยไล่ไปค่าจริงเมื่อวัดเสร็จ ไม่งั้นเพลงเสียงดังจะดังเต็มที่ช่วงแรกแล้วหล่นฮวบ
+  let lufsFailed = $state<number[]>([]);
+  const gainTarget = $derived(
+    (normalize ? (current && current.lufs == null && !lufsFailed.includes(current.id) ? 0.5 : normGain(current?.lufs)) : 1) * 10 ** ((current?.gainDb ?? 0) / 20)
+  );
+  let gain = $state(1);
+  let gainFor = -1, gainRaf = 0;
+  $effect(() => {
+    const to = gainTarget, id = current?.id ?? -1;
+    cancelAnimationFrame(gainRaf);
+    if (id !== gainFor || Math.abs(to - gain) < 0.01) { gainFor = id; gain = to; return; } // เปลี่ยนเพลง = ตั้งทันที
+    const from = gain, t0 = performance.now();
+    const step = (now: number) => {
+      const k = Math.min(1, (now - t0) / 900);
+      gain = from + (to - from) * k;
+      if (k < 1) gainRaf = requestAnimationFrame(step);
+    };
+    gainRaf = requestAnimationFrame(step);
+  });
   const vol = () => Math.min(1, (volume / 100) * gain);
   // fx เปิดอยู่: คุมเสียงที่ master gain (เด็คคงที่ที่ 1) ไม่งั้นคุมที่ <audio> ตรงๆ
   function applyVol(mul = 1) {
@@ -733,6 +777,7 @@
     } catch {
       /* ถอดรหัสไม่ได้: ข้าม เล่นด้วยระดับเสียงปกติ */
     }
+    if (t.lufs == null) lufsFailed.push(t.id); // วัดไม่ได้ ก็เลิกเบาไว้ก่อน
   }
   $effect(() => {
     const t = current;
@@ -2052,14 +2097,35 @@
   let syncI = $state(0);
   const lrcTime = (t: number) => `${String(Math.floor(t / 60)).padStart(2, '0')}:${(t % 60).toFixed(2).padStart(5, '0')}`;
   // ---------- AI จับเวลาเนื้อเพลง (whisper.cpp รุ่น small รันในเครื่อง) ----------
-  let ai = $state<{ stage: 'engine' | 'model' | 'run'; pct: number } | null>(null);
+  type WPart = { phase: 'missing' | 'downloading' | 'paused' | 'verifying' | 'extracting' | 'ready' | 'failed'; done: number; total: number; error: string | null };
+  type WState = { engine: WPart; model: WPart; running: boolean };
+  let ai = $state<{ stage: 'engine' | 'model' | 'extract' | 'run'; pct: number } | null>(null);
+  let aiWait: ((s: WState) => void) | null = null;
+  function aiFromState(st: WState) {
+    const e = st.engine, m = st.model;
+    const pct = (p: WPart) => (p.total ? Math.round((p.done / p.total) * 100) : 0);
+    if (e.phase === 'extracting' || e.phase === 'verifying') ai = { stage: 'extract', pct: 0 };
+    else if (e.phase === 'downloading') ai = { stage: 'engine', pct: pct(e) };
+    else if (m.phase === 'downloading' || m.phase === 'verifying') ai = { stage: 'model', pct: pct(m) };
+    if (!st.running) { const f = aiWait; aiWait = null; f?.(st); }
+  }
   onMount(() => {
-    const u1 = listen<{ stage: 'engine' | 'model'; done: number; total: number }>('whisper-setup', (e) => {
-      if (ai) ai = { stage: e.payload.stage, pct: e.payload.total ? Math.round((e.payload.done / e.payload.total) * 100) : 0 };
-    });
+    const u1 = listen<WState>('whisper-state', (e) => { if (ai) aiFromState(e.payload); });
     const u2 = listen<number>('whisper-progress', (e) => { if (ai) ai = { stage: 'run', pct: e.payload }; });
     return () => { void u1.then((f) => f()); void u2.then((f) => f()); };
   });
+  /** เตรียม AI ให้พร้อม (โหลดต่อจากที่ค้างไว้ได้) คืนค่าเมื่อจบ ถ้าไม่ครบจะโยนเหตุผลออกมา */
+  async function aiPrepare() {
+    const done = new Promise<WState>((res) => (aiWait = res));
+    const now = await invoke<WState>('whisper_setup');
+    aiFromState(now);
+    const st = await done;
+    if (st.engine.phase === 'ready' && st.model.phase === 'ready') return;
+    const bad = st.engine.phase !== 'ready' ? st.engine : st.model;
+    if (!bad.error) throw new Error(tr('ยกเลิกการโหลดแล้ว กดอีกครั้งเพื่อโหลดต่อจากเดิม'));
+    throw new Error(tr('โหลด AI ไม่สำเร็จ: {0} (กดอีกครั้งเพื่อโหลดต่อจากเดิม)', tr(bad.error)));
+  }
+  const aiCancel = () => void invoke(ai?.stage === 'run' ? 'whisper_cancel' : 'whisper_setup_cancel');
   async function aiSync() {
     const t = current;
     const lines = lyText.split(/\r?\n/).map(stripTags).filter(Boolean);
@@ -2067,15 +2133,16 @@
     if (!t || ai) return;
     lyMsg = '';
     try {
-      const st = await invoke<{ engine: boolean; model: boolean }>('whisper_status');
-      if (!st.engine || !st.model) {
+      const st = await invoke<WState>('whisper_state');
+      if (st.engine.phase !== 'ready' || st.model.phase !== 'ready') {
+        const resume = st.engine.phase === 'paused' || st.model.phase === 'paused';
         const ok = await new Promise<boolean>((res) => {
-          ask(tr('ครั้งแรกต้องโหลดตัว AI (whisper รุ่น small) ประมาณ 480 MB เก็บไว้ในเครื่อง ครั้งต่อไปไม่ต้องโหลดอีก โหลดเลยไหม?'), tr('โหลด'), () => res(true));
+          ask(resume ? tr('โหลด AI ค้างอยู่ จะโหลดต่อจากเดิมเลยไหม?') : tr('ครั้งแรกต้องโหลดตัว AI (whisper รุ่น small) ประมาณ 480 MB เก็บไว้ในเครื่อง ครั้งต่อไปไม่ต้องโหลดอีก โหลดเลยไหม?'), resume ? tr('โหลดต่อ') : tr('โหลด'), () => res(true));
           confirmDlg?.addEventListener('close', () => setTimeout(() => res(false), 0), { once: true });
         });
         if (!ok) return;
-        ai = { stage: st.engine ? 'model' : 'engine', pct: 0 };
-        await invoke('whisper_setup');
+        ai = { stage: st.engine.phase === 'ready' ? 'model' : 'engine', pct: 0 };
+        await aiPrepare();
       }
       ai = { stage: 'run', pct: 0 };
       const words = await invoke<Word[]>('whisper_run', { path: t.path, lang: /[\u0e00-\u0e7f]/.test(lines.join('')) ? 'th' : 'auto' });
@@ -2091,7 +2158,7 @@
       ai = null;
     }
   }
-  const aiText = $derived(ai ? (ai.stage === 'engine' ? tr('กำลังโหลดตัวโปรแกรม AI… {0}%', ai.pct) : ai.stage === 'model' ? tr('กำลังโหลดโมเดล AI… {0}%', ai.pct) : tr('AI กำลังฟังเพลง… {0}%', ai.pct)) : '');
+  const aiText = $derived(ai ? (ai.stage === 'extract' ? tr('กำลังติดตั้งตัวโปรแกรม AI…') : ai.stage === 'engine' ? tr('กำลังโหลดตัวโปรแกรม AI… {0}%', ai.pct) : ai.stage === 'model' ? tr('กำลังโหลดโมเดล AI… {0}%', ai.pct) : tr('AI กำลังฟังเพลง… {0}%', ai.pct)) : '');
   function startSync() {
     const lines = lyText.split(/\r?\n/).map(stripTags).filter(Boolean);
     if (!lines.length) return void (lyMsg = tr('วางเนื้อเพลงแบบข้อความธรรมดาลงช่องก่อน แล้วค่อยเริ่มตั้งเวลา'));
@@ -2391,6 +2458,7 @@
     msg?: string;
     playlist: boolean;
     count: number;
+    cur?: string; idx?: number; n?: number; skipped?: number;
   };
   let downloads = $state<Dl[]>([]);
   let url = $state('');
@@ -2400,15 +2468,13 @@
 
   function onTrackDone(job: number, r: Done) {
     const d = downloads.find((x) => x.id === job);
+    if (d) d.count++; // นับทุกเพลงที่ yt-dlp รายงาน แม้อยู่ในคลังอยู่แล้ว
     if (library.some((t) => t.path === r.path)) return; // ไฟล์เดิมอยู่แล้ว (เช่น เพลงในเพลย์ลิสต์ที่เคยโหลด)
     const today = new Date().toISOString().slice(0, 10);
     const id = Date.now() + seq++;
     const sp = splitArtistTitle(r.title); // "ศิลปิน - ชื่อเพลง" → แยกใส่ช่องศิลปิน
     library.unshift({ id, src: d?.src ?? 'youtube', added: today, last: today, plays: 0, title: sp?.title ?? r.title, artist: sp?.artist ?? r.artist, album: r.album, dur: r.dur, path: r.path, cover: r.cover, coverUrl: r.thumb, url: r.url });
-    if (d) {
-      d.count++;
-      if (!d.playlist) d.title = r.title;
-    }
+    if (d && !d.playlist) d.title = r.title;
     if (r.playlist) addToPlaylist(playlists.find((p) => p.name === r.playlist)?.id ?? newPlaylist(r.playlist), id);
     const w = r.url ? plWait.get(linkKey(r.url)) : undefined;
     if (w !== undefined) { addToPlaylist(w, id); plWait.delete(linkKey(r.url)); }
@@ -2435,10 +2501,13 @@
       runJob(d).finally(() => { dlRunning--; pump(); });
     }
   }
+  const running = new Set<number>(); // กันงานเดียวกันถูกสั่งซ้อน (กดลองใหม่รัวๆ / คิว + ปุ่ม)
   async function runJob(d: Dl) {
+    if (running.has(d.id)) return;
+    running.add(d.id);
     d.state = 'waiting';
     d.msg = undefined;
-    d.pct = 0;
+    d.pct = 0; d.count = 0; d.idx = 0; d.n = 0; d.skipped = 0; d.cur = undefined;
     try {
       await invoke('download', { id: d.id, url: d.url, playlist: d.playlist, cookies: ytCookies });
       d.state = 'done';
@@ -2446,6 +2515,9 @@
     } catch (e) {
       d.state = 'failed';
       d.msg = tr(String(e));
+    } finally {
+      running.delete(d.id);
+      startedDl.delete(d.id);
     }
   }
   async function addDownload(raw?: string) {
@@ -2568,7 +2640,7 @@
     onseeked={() => decks[i] === audio && seeks++}
     onended={() => decks[i] === audio && ended()}
     onerror={() => decks[i] === audio && audioError()}
-    onplaying={() => decks[i] === audio && attachViz()}
+    onplaying={() => { if (decks[i] === audio) { corsTried = null; attachViz(); } }}
     crossorigin="anonymous"
   ></audio>
 {/each}
@@ -2973,8 +3045,8 @@
         <div class="dl">
           <span class="thumb big" style:background={cover(d.title)}></span>
           <div class="grow">
-            <b>{d.playlist ? tr('เพลย์ลิสต์ · ได้แล้ว {0} เพลง', d.count) : d.title}</b>
-            <small class="dim">{d.src === 'youtube' ? 'YouTube' : 'SoundCloud'} · {tr(stateText[d.state])}</small>
+            <b>{d.playlist ? (d.n ? tr('{0} · เพลงที่ {1}/{2}', d.title, d.idx, d.n) : tr('เพลย์ลิสต์ · ได้แล้ว {0} เพลง', d.count)) : d.title}</b>
+            <small class="dim">{d.src === 'youtube' ? 'YouTube' : 'SoundCloud'} · {tr(stateText[d.state])}{#if d.playlist && d.cur && d.state !== 'done'} · {d.cur}{/if}{#if d.playlist && d.count} · {tr('ได้แล้ว {0}', d.count)}{/if}</small>
             {#if d.msg}<small class="errtxt">{d.msg}</small>{/if}
             <div class="bar"><i style:width="{d.pct}%"></i></div>
           </div>
@@ -2984,6 +3056,12 @@
       </div>
     {:else if view === 'tools'}
       <h1>{tr('เครื่องมือ')}</h1>
+      <div class="tooltabs" role="tablist" aria-label={tr('หมวดเครื่องมือ')}>
+        {#each TOOL_TABS as [k, label] (k)}
+          <button type="button" role="tab" aria-selected={toolTab === k} class:on={toolTab === k} onclick={() => (toolTab = k)}>{tr(label)}</button>
+        {/each}
+      </div>
+      {#if toolTab === 'gen'}
       <h2>{tr('Windows')}</h2>
       <div class="tool">
         <div><b>{tr('ปิดหน้าต่างแล้วย่อไปถาดระบบ')}</b><small class="dim">{tr('กดปิดแล้วเพลงยังเล่นต่อ คลิกไอคอนที่มุมขวาล่างเพื่อเปิดกลับ คลิกขวาที่ไอคอนเพื่อควบคุมเพลงหรือออกจากแอป')}</small></div>
@@ -3005,6 +3083,8 @@
         <div><b>{tr('แถบความคืบหน้าบนแถบงาน')}</b><small class="dim">{tr('ไอคอน MySound บนแถบงานแสดงว่าเพลงเล่นไปถึงไหนแล้ว')}</small></div>
         <label class="switch"><input type="checkbox" name="taskprog" bind:checked={taskProg} /><span>{taskProg ? tr('เปิด') : tr('ปิด')}</span></label>
       </div>
+      {/if}
+      {#if toolTab === 'gen'}
       <h2>{tr('อัตโนมัติ')}</h2>
       <div class="tool">
         <div><b>{tr('นาฬิกาปลุก')}</b><small class="dim">{tr('เล่นเพลย์ลิสต์ตามเวลาทุกวัน (แอปต้องเปิดอยู่หรือย่ออยู่ในถาดระบบ)')}</small></div>
@@ -3034,6 +3114,8 @@
         <div><b>{tr('ติดตั้งอัปเดตแอปให้เอง')}</b><small class="dim">{tr('เมื่อมีเวอร์ชันใหม่และไม่ได้เล่นเพลงอยู่ จะติดตั้งแบบเงียบแล้วเปิดแอปใหม่')}</small></div>
         <label class="switch"><input type="checkbox" name="autoupd" bind:checked={autoUpd} /><span>{autoUpd ? tr('เปิด') : tr('ปิด')}</span></label>
       </div>
+      {/if}
+      {#if toolTab === 'net'}
       <h2>{tr('เชื่อมต่อ')}</h2>
       <div class="tool">
         <div><b>{tr('รีโมทผ่านมือถือ')}</b><small class="dim">{tr('เปิดลิงก์บนมือถือที่ต่อ Wi‑Fi เดียวกัน เพื่อสั่งเล่น หยุด ข้าม ปรับเสียง และเลือกเพลง (Windows อาจถามให้อนุญาตผ่านไฟร์วอลล์)')}</small></div>
@@ -3057,6 +3139,8 @@
         </div>
       {/if}
       <p class="dim" role="status" aria-live="polite">{lfmMsg}</p>
+      {/if}
+      {#if toolTab === 'lib'}
       <h2>{tr('นำเข้าและสำรองข้อมูล')}</h2>
       <div class="tool">
         <div><b>{tr('นำเข้าไฟล์เพลงจากเครื่อง')}</b><small class="dim">{tr('หรือลากไฟล์มาวางในหน้าต่างแอป อ่านชื่อ ศิลปิน อัลบั้ม และปกจากแท็กในไฟล์ (ไฟล์จะถูกคัดลอกเข้าแอป)')}</small></div>
@@ -3077,6 +3161,8 @@
         <button class="ghost" onclick={restore}>{tr('กู้คืน…')}</button>
       </div>
       <p class="dim" role="status" aria-live="polite">{fileMsg}</p>
+      {/if}
+      {#if toolTab === 'lib'}
       <h2>{tr('จัดการคลัง')}</h2>
       <div class="tool">
         <div><b>{tr('เพลงซ้ำ')}</b><small class="dim">{tr('หาเพลงที่โหลดมาซ้ำ แล้วเลือกเก็บอันเดียว')}</small></div>
@@ -3095,6 +3181,8 @@
         <button class="ghost" disabled={!missing.length} onclick={repairMissing}>{tr('เลือกโฟลเดอร์…')}</button>
       </div>
       <p class="dim" role="status" aria-live="polite">{relinkMsg}</p>
+      {/if}
+      {#if toolTab === 'lyr'}
       <h2>{tr('เนื้อเพลง')}</h2>
       <div class="tool">
         <div><b>{tr('โหลดเนื้อเพลงทั้งคลัง')}</b><small class="dim">{tr('เก็บไว้ในเครื่อง ดูได้แม้ไม่มีเน็ต และใช้ค้นหาจากเนื้อเพลงได้ (มีแล้ว {0} เพลง)', lyCount)}</small></div>
@@ -3114,6 +3202,8 @@
         <button class="ghost" onclick={undo}>{tr('ย้อนกลับ')}</button>
         <button class="ghost" onclick={redo}>{tr('ทำซ้ำ')}</button>
       </div>
+      {/if}
+      {#if toolTab === 'sys'}
       <h2>{tr('โปรแกรมที่แอปเรียกใช้')}</h2>
       <div class="tool">
         <div><b>yt-dlp</b><small class="dim">{ytVer === undefined ? tr('กำลังตรวจ…') : ytVer === null ? tr('ไม่พบ — winget install yt-dlp.yt-dlp') : tr('เวอร์ชัน {0}', ytVer) + (ytAge !== null ? tr(' ({0} วันที่แล้ว)', ytAge) : '')}</small></div>
@@ -3127,6 +3217,8 @@
         <div><b>{tr('แสดงเนื้อเพลงในแถบเล่นด้านล่าง')}</b><small class="dim">{tr('บรรทัดที่กำลังร้องจะขึ้นใต้แถบเลื่อนเวลา (ต้องเป็นเพลงที่มีเนื้อแบบมีเวลา)')}</small></div>
         <label class="switch"><input type="checkbox" name="barly" bind:checked={barLy} /><span>{barLy ? tr('เปิด') : tr('ปิด')}</span></label>
       </div>
+      {/if}
+      {#if toolTab === 'snd'}
       <h2>{tr('เอฟเฟกต์เสียง')}</h2>
       <div class="tool">
         <div><b>{tr('อีควอไลเซอร์')}</b><small class="dim">{tr('ปรับเบส/แหลม 10 แบนด์ เปิดแล้วแอปจะส่งเสียงผ่านตัวประมวลผลเสียง')}</small></div>
@@ -3205,6 +3297,8 @@
           <input type="text" name="ytcookiefile" autocomplete="off" spellcheck="false" placeholder={tr('เช่น C:\\Users\\คุณ\\cookies.txt…')} value={ytCookies.slice(5)} oninput={(e) => (ytCookies = 'file:' + e.currentTarget.value)} />
         </div>
       {/if}
+      {/if}
+      {#if toolTab === 'net'}
       <h2>Discord</h2>
       <div class="tool">
         <div><b>{tr('แสดงเพลงที่ฟังอยู่ในสถานะ Discord')}</b><small class="dim">{tr('ไม่ต้องเพิ่มแอปใน Discord เอง แค่เปิด Discord แบบแอปบนคอมไว้ แล้วกด “เชื่อมต่อ / ทดสอบ” (และเปิด Activity Privacy ในการตั้งค่า Discord)')}</small></div>
@@ -3216,18 +3310,23 @@
         <label class="switch"><input type="checkbox" name="discordly" bind:checked={discordLy} disabled={!discord} /><span>{discordLy ? tr('เปิด') : tr('ปิด')}</span></label>
       </div>
       <p class="dim" role="status" aria-live="polite">{discord ? discordMsg : ''}</p>
+      {/if}
+      {#if toolTab === 'lib'}
       <h2>{tr('ส่งออกคลังเพลง')}</h2>
       <div class="tool">
         <div><b>{tr('คัดลอกทุกเพลงไปโฟลเดอร์อื่น')}</b><small class="dim">{tr('ตั้งชื่อไฟล์เป็น “ศิลปิน - ชื่อเพลง” ถ้ามี ffmpeg จะฝังชื่อ ศิลปิน อัลบั้ม และปกให้ (ไฟล์ m4a/mp3)')}</small></div>
         <button class="ghost" disabled={toolBusy || !library.length} onclick={exportAll}>{tr('เลือกโฟลเดอร์แล้วส่งออก…')}</button>
       </div>
       <p class="dim" role="status" aria-live="polite">{toolMsg}</p>
+      {/if}
+      {#if toolTab === 'lib'}
       <h2>{tr('ตรวจไฟล์เพลง')}</h2>
       {#if missingTracks.length}
         <p class="dim">{tr('พบเพลงที่ไฟล์เสียงหายไปจากเครื่อง {0} เพลง', missingTracks.length)}</p>
         <button class="ghost" onclick={() => ask(tr('เอา {0} เพลงที่ไฟล์หายออกจากคลัง?', missingTracks.length), tr('เอาออก'), () => removeTracks(missingTracks))}>{tr('เอาเพลงที่ไฟล์หายออกจากคลัง…')}</button>
       {:else}
         <p class="dim">{tr('ไฟล์เพลงทุกไฟล์อยู่ครบ')}</p>
+      {/if}
       {/if}
     {:else if view === 'look'}
       <h1>{tr('หน้าตา')}</h1>
@@ -3559,7 +3658,8 @@
 {#if notice}
   <div class="toast n" role="status">
     <span class="errtxt">{notice}</span>
-    <button class="ghost" onclick={() => (notice = '')}>{tr('ปิด')}</button>
+    {#if badTrack}<button class="ghost" onclick={() => { const t = badTrack; badTrack = null; notice = ''; if (t) toTrash([t]); }}>{tr('ลบเพลงนี้')}</button>{/if}
+    <button class="ghost" onclick={() => { notice = ''; badTrack = null; }}>{tr('ปิด')}</button>
   </div>
 {/if}
 
@@ -3691,7 +3791,7 @@
   </form>
 </dialog>
 
-<dialog bind:this={lyDlg} class="edit" aria-labelledby="ly-h" onkeydown={syncKey} onclose={() => (sync = null)}>
+<dialog bind:this={lyDlg} class="edit lydlg" aria-labelledby="ly-h" onkeydown={syncKey} onclose={() => (sync = null)}>
   <form onsubmit={(e) => (e.preventDefault(), saveLy())}>
     <h2 id="ly-h">{tr('เนื้อเพลงของเพลงนี้')}</h2>
     <p class="dim">{tr('วางเนื้อเพลงลงช่อง ถ้าอยากให้เลื่อนตามเวลา ใช้รูปแบบ LRC เช่น')} <code>{tr('[01:23.50] ข้อความ')}</code> {tr('ต่อบรรทัด หรือเลือกไฟล์ .lrc/.txt')}</p>
@@ -3713,17 +3813,20 @@
     {/if}
     {#if ai}<div class="aibar" role="progressbar" aria-label={aiText} aria-valuenow={ai.pct} aria-valuemin={0} aria-valuemax={100}><i style:width="{ai.pct}%"></i></div>{/if}
     <p class="errtxt" role="status">{lyMsg}</p>
-    <div class="actions">
+    <div class="lytools">
       <button type="button" class="ghost" onclick={pickLrc}>{tr('เลือกไฟล์…')}</button>
       {#if !sync}<button type="button" class="ghost" disabled={!!ai} onclick={startSync}>{tr('ตั้งเวลาเอง (แตะตามเพลง)')}</button>{/if}
       {#if !sync}
         {#if ai}
-          <button type="button" class="ghost" onclick={() => invoke('whisper_cancel')}>{tr('ยกเลิก')} · {aiText}</button>
+          <button type="button" class="ghost" onclick={aiCancel}>{tr('ยกเลิก')} · {aiText}</button>
         {:else}
           <button type="button" class="ghost" onclick={aiSync}>{tr('ให้ AI จับเวลาให้')}</button>
         {/if}
       {/if}
+    </div>
+    <div class="actions lyfoot">
       {#if current?.lrc}<button type="button" class="ghost danger" onclick={() => saveLy(true)}>{tr('ลบที่ตั้งเอง (กลับไปใช้ LRCLIB)')}</button>{/if}
+      <span class="grow"></span>
       <button type="button" class="ghost" onclick={() => lyDlg?.close()}>{tr('ปิด')}</button>
       <button class="primary">{tr('บันทึก')}</button>
     </div>
@@ -4090,6 +4193,11 @@
   .edit.small { width: min(420px, 92vw); }
   .edit.small p { margin: 12px 0; overflow-wrap: anywhere; }
 
+  .tooltabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; position: sticky; top: 0; z-index: 2; padding: 8px 0; background: var(--bg-base); }
+  .tooltabs button { height: 32px; padding: 0 14px; border-radius: 16px; border: 1px solid var(--line); background: transparent; color: var(--dim, var(--text)); cursor: pointer; transition: background-color 150ms ease, color 150ms ease; }
+  .tooltabs button:hover { background: var(--bg-raised); color: var(--text); }
+  .tooltabs button.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent, #000); }
+  .tooltabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .tool { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; margin-bottom: 8px; border-radius: 8px; background: var(--bg-raised); }
   .switch { display: flex; align-items: center; gap: 8px; cursor: pointer; flex: none; }
   .switch input { width: 18px; height: 18px; accent-color: var(--accent); }
@@ -4141,6 +4249,10 @@
   .star { font-size: 1.5rem; line-height: 1; padding: 2px 4px; color: var(--text-dim); }
   .star.on { color: var(--accent); }
   .lybtn { margin: 4px 0 8px; align-self: flex-start; }
+  .lydlg { width: min(640px, 94vw); max-height: 92vh; overflow-y: auto; }
+  .lytools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .lyfoot { flex-wrap: wrap; align-items: center; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .lyfoot .grow { flex: 1; }
   .lytext { width: 100%; min-height: 240px; padding: 12px; border-radius: 8px; border: 1px solid var(--line2); background: var(--bg-base); color: var(--text); font: inherit; resize: vertical; }
   .errtxt { color: var(--danger); min-height: 1.2em; }
   .viz { width: 100%; height: 64px; color: var(--accent); margin-top: 8px; }
