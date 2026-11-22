@@ -101,3 +101,48 @@ export function lookVars(l: Look): Record<string, string> {
     '--row-h': `${l.row}px`
   };
 }
+
+// ---------- ดึงชุดสีจากรูป ----------
+function hsl2hex(h: number, s: number, l: number): string {
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))));
+  };
+  return '#' + [f(0), f(8), f(4)].map((v) => v.toString(16).padStart(2, '0')).join('');
+}
+
+/** หาโทนสีเด่นของรูป (พิกเซล RGBA) แล้วสร้างธีมมืดโทนเดียวกัน: สีเน้นสว่าง + พื้นแผงสามระดับ
+ *  รูปที่เป็นขาวดำเกือบทั้งภาพจะได้ธีมเทาเป็นกลาง */
+export function paletteFromPixels(d: ArrayLike<number>): Pick<Look, 'accent' | 'base' | 'raised' | 'outer'> {
+  const BINS = 24;
+  const w = new Array(BINS).fill(0), sx = new Array(BINS).fill(0), sy = new Array(BINS).fill(0), ss = new Array(BINS).fill(0);
+  let total = 0;
+  for (let i = 0; i + 3 < d.length; i += 4) {
+    if (d[i + 3] < 128) continue;
+    const r = d[i] / 255, g = d[i + 1] / 255, b = d[i + 2] / 255;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, c = mx - mn;
+    if (c < 0.04) continue; // เกือบเทา ไม่มีโทนสี
+    const s = c / (1 - Math.abs(2 * l - 1));
+    let h = mx === r ? ((g - b) / c) % 6 : mx === g ? (b - r) / c + 2 : (r - g) / c + 4;
+    h = ((h * 60) + 360) % 360;
+    const wt = s * (1 - Math.abs(2 * l - 1)); // ชอบสีสด ไม่มืด/สว่างจัด
+    const bin = Math.min(BINS - 1, Math.floor((h / 360) * BINS));
+    w[bin] += wt; ss[bin] += s * wt;
+    sx[bin] += Math.cos((h * Math.PI) / 180) * wt;
+    sy[bin] += Math.sin((h * Math.PI) / 180) * wt;
+    total += wt;
+  }
+  const best = w.indexOf(Math.max(...w));
+  if (total < 1 || w[best] <= 0) {
+    return { accent: '#d1d5db', base: '#111214', raised: '#1a1b1e', outer: '#050505' };
+  }
+  const h = ((Math.atan2(sy[best], sx[best]) * 180) / Math.PI + 360) % 360;
+  const s = Math.min(0.9, Math.max(0.45, ss[best] / w[best]));
+  return {
+    accent: hsl2hex(h, s, 0.66),
+    base: hsl2hex(h, 0.22, 0.07),
+    raised: hsl2hex(h, 0.2, 0.11),
+    outer: hsl2hex(h, 0.25, 0.03)
+  };
+}

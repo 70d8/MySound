@@ -464,7 +464,7 @@ const DISCORD_APP_ID: &str = "1573766901916762202";
 const NO_DISCORD: &str = "ต่อ Discord ไม่ได้ ต้องเปิด Discord แบบแอปบนคอมไว้ก่อน";
 
 #[derive(Default)]
-struct Discord(Mutex<Option<DiscordIpcClient>>);
+struct Discord(std::sync::Arc<Mutex<Option<DiscordIpcClient>>>);
 
 /// Discord รับข้อความยาว 2-128 ตัวอักษรเท่านั้น
 fn dtext(s: &str) -> Option<String> {
@@ -472,43 +472,68 @@ fn dtext(s: &str) -> Option<String> {
     (t.chars().count() >= 2).then_some(t)
 }
 
+/// ชื่อที่สั้นเกิน 2 ตัวอักษร Discord จะปฏิเสธ จึงเติมสัญลักษณ์นำหน้าแทนการไม่ส่ง
+fn dtitle(s: &str) -> String {
+    dtext(s).or_else(|| dtext(&format!("♪ {}", s.trim()))).unwrap_or_else(|| "MySound".into())
+}
+
 #[tauri::command]
-async fn discord_update(state: tauri::State<'_, Discord>, title: String, artist: String, playing: bool, pos: f64, dur: f64, cover: Option<String>) -> Result<(), String> {
-    let mut g = state.0.lock().map_err(|e| e.to_string())?;
-    if g.is_none() {
-        let mut c = DiscordIpcClient::new(DISCORD_APP_ID);
-        c.connect().map_err(|_| NO_DISCORD.to_string())?;
-        *g = Some(c);
-    }
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
-    let mut a = Activity::new().activity_type(ActivityType::Listening);
-    if let Some(t) = dtext(&title) { a = a.details(t); }
-    if let Some(u) = cover.as_deref().filter(|u| u.starts_with("https://") && u.len() < 256) {
-        a = a.assets(Assets::new().large_image(u));
-    }
-    if playing {
-        if let Some(t) = dtext(&artist) { a = a.state(t); }
-        let start = now - (pos * 1000.0) as i64;
-        let mut ts = Timestamps::new().start(start);
-        if dur > 0.0 { ts = ts.end(start + (dur * 1000.0) as i64); }
-        a = a.timestamps(ts);
-    } else {
-        a = a.state("Paused");
-    }
-    if g.as_mut().map(|c| c.set_activity(a)).transpose().is_err() {
-        *g = None; // Discord ถูกปิดไป ครั้งหน้าจะต่อใหม่
-        return Err(NO_DISCORD.into());
-    }
-    Ok(())
+async fn discord_update(state: tauri::State<'_, Discord>, title: String, artist: String, playing: bool, pos: f64, dur: f64, cover: Option<String>, line: Option<String>) -> Result<(), String> {
+    let cell = state.0.clone();
+    // ต่อ/ส่งผ่าน IPC เป็นงาน blocking: ย้ายไป thread แยก ไม่ให้ค้าง runtime ถ้า Discord ตอบช้า
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut g = cell.lock().map_err(|e| e.to_string())?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        // ลองสูงสุด 2 รอบ: รอบแรกพลาด (Discord เพิ่งเปิด/ปิดไปแล้วเปิดใหม่) ก็ต่อใหม่แล้วส่งซ้ำทันที
+        for attempt in 0..2 {
+            if g.is_none() {
+                let mut c = DiscordIpcClient::new(DISCORD_APP_ID);
+                if c.connect().is_err() {
+                    return Err(NO_DISCORD.to_string());
+                }
+                *g = Some(c);
+            }
+            let details = dtitle(&title);
+            let mut a = Activity::new().activity_type(ActivityType::Listening).details(details);
+            if let Some(u) = cover.as_deref().filter(|u| u.starts_with("https://") && u.len() < 256) {
+                let mut assets = Assets::new().large_image(u);
+                if line.is_some() { if let Some(t) = dtext(&artist) { assets = assets.large_text(t); } } // ศิลปินย้ายไปแสดงตอนชี้รูปปก
+                a = a.assets(assets);
+            }
+            if playing {
+                // มีบรรทัดเนื้อเพลง: ใช้แทนชื่อศิลปินในบรรทัดที่สอง
+                if let Some(t) = line.as_deref().and_then(dtext).or_else(|| dtext(&artist)) { a = a.state(t); }
+                let start = now - (pos * 1000.0) as i64;
+                let mut ts = Timestamps::new().start(start);
+                if dur > 0.0 { ts = ts.end(start + (dur * 1000.0) as i64); }
+                a = a.timestamps(ts);
+            } else {
+                a = a.state("Paused");
+            }
+            if g.as_mut().map(|c| c.set_activity(a)).transpose().is_ok() {
+                return Ok(());
+            }
+            *g = None; // ท่อเสีย: ทิ้งแล้วต่อใหม่ในรอบถัดไป
+            if attempt == 1 { break; }
+        }
+        Err(NO_DISCORD.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 async fn discord_clear(state: tauri::State<'_, Discord>) -> Result<(), String> {
-    let mut g = state.0.lock().map_err(|e| e.to_string())?;
-    if let Some(c) = g.as_mut() {
-        if c.clear_activity().is_err() { *g = None; }
-    }
-    Ok(())
+    let cell = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut g = cell.lock().map_err(|e| e.to_string())?;
+        if let Some(c) = g.as_mut() {
+            if c.clear_activity().is_err() { *g = None; }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 

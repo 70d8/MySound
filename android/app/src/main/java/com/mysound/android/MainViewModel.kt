@@ -123,6 +123,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var repeatAll by mutableStateOf(false); private set
     var message by mutableStateOf<String?>(null)
 
+    // ถ้าแตะเพลงก่อนที่ตัวควบคุมเครื่องเล่นจะเชื่อมต่อเสร็จ (ช่วงเปิดแอปใหม่) จำไว้แล้วเล่นให้ทันทีที่พร้อม
+    private var pendingPlay: Pair<Track, List<Track>>? = null
+
     private var controller: MediaController? = null
 
     private val listener = object : Player.Listener {
@@ -150,6 +153,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 controller = c
                 c.addListener(listener)
                 sync(c)
+                pendingPlay?.let { (t, l) -> pendingPlay = null; play(t, l) }
             } catch (e: Exception) {
                 message = "Cannot start the player: ${e.message}"
             }
@@ -173,7 +177,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         .build()
 
     fun play(t: Track, list: List<Track>) {
-        val c = controller ?: return
+        val c = controller
+        if (c == null) { pendingPlay = t to list; return }
         c.setMediaItems(list.map(::item), list.indexOfFirst { it.id == t.id }.coerceAtLeast(0), 0L)
         c.prepare()
         c.play()

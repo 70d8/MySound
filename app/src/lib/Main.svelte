@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { invoke, convertFileSrc } from '@tauri-apps/api/core';
   import { listen, emit } from '@tauri-apps/api/event';
   import { open } from '@tauri-apps/plugin-dialog';
@@ -11,7 +11,7 @@
     fmt, fmtDate, cover, art, hue, parseLrc, lrcIndex, linkKey, isPlaylistLink, isSupportedLink, versionAgeDays,
     type Track, type Playlist, type LrcLine
   } from '$lib/data';
-  import { THEMES, LAYOUTS, DEFAULT_LOOK, normalizeLook, lookVars, isLight, type Look } from '$lib/look';
+  import { THEMES, LAYOUTS, DEFAULT_LOOK, normalizeLook, lookVars, isLight, paletteFromPixels, type Look } from '$lib/look';
 
   type Done = { title: string; artist: string; album: string; dur: number; playlist: string | null; url: string; thumb: string | null; path: string; cover: string | null };
 
@@ -40,6 +40,8 @@
   let speed = $state(1);
   let discord = $state(true); // แสดงเพลงที่ฟังใน Discord
   let discordMsg = $state('');
+  let discordLy = $state(false); // แสดงบรรทัดเนื้อเพลงใต้ชื่อเพลงในสถานะ Discord
+  let dLine = $state(''); // บรรทัดที่ส่งไป Discord ล่าสุด (จำกัดความถี่)
   let seeks = $state(0); // นับครั้งที่กรอเพลง เพื่อให้ Discord ปรับแถบเวลา
 
   // ---------- derived ----------
@@ -91,6 +93,7 @@
         shuffle = !!p.shuffle;
         repeat = !!p.repeat;
         discord = p.discord ?? true;
+        discordLy = !!p.discordLy;
         speed = p.speed ?? 1;
         if (p.lang === 'th' || p.lang === 'en') i18n.lang = p.lang;
         look = normalizeLook(p.look);
@@ -134,7 +137,7 @@
     const json = JSON.stringify({
       tracks: $state.snapshot(library),
       playlists: $state.snapshot(playlists),
-      prefs: { volume, shuffle, repeat, discord, speed, lang: i18n.lang, look: $state.snapshot(look), resumeId: current?.id ?? null, resumePos }
+      prefs: { volume, shuffle, repeat, discord, discordLy, speed, lang: i18n.lang, look: $state.snapshot(look), resumeId: current?.id ?? null, resumePos }
     });
     const timer = setTimeout(() => invoke('write_library', { json }).catch((e) => (notice = tr('บันทึกไม่ได้: {0}', tr(String(e))))), 400);
     return () => clearTimeout(timer);
@@ -296,20 +299,48 @@
   });
 
 
-  // ---------- Discord Rich Presence: ส่งเฉพาะตอนเปลี่ยนเพลง/เล่น-หยุด/กรอ ไม่ส่งทุกวินาที ----------
-  $effect(() => {
-    if (!loaded) return;
-    const t = current, on = discord, isPlaying = playing;
-    void seeks;
-    if (!on || !t) {
-      invoke('discord_clear').catch(() => {});
-      discordMsg = '';
-      return;
+  // ---------- Discord Rich Presence: State Machine ----------
+  // สถานะที่ต้องการ (desired) = off | paused | playing(+เพลง+บรรทัดเนื้อเพลง) อ่านจาก <audio> จริง ไม่เชื่อธง `playing`
+  // สถานะที่ส่งไปล่าสุด (sent) เก็บเป็น key แล้ว reconcile(): ถ้า desired ≠ sent ค่อยส่ง, ส่งทีละครั้ง (inflight)
+  // ถ้าระหว่างส่งมีอะไรเปลี่ยนก็ทำซ้ำอีกรอบ + heartbeat ทุก 10 วิ ซ่อมกรณี Discord ทิ้งอัปเดต
+  let dSent = '', dBusy = false, dDirty = false;
+  function dDesired(): { key: string; t: Track | null; mode: 'off' | 'paused' | 'playing'; line: string } {
+    const t = current;
+    if (!loaded || !discord || !t) return { key: 'off', t: null, mode: 'off', line: '' };
+    const mode = audio && !audio.paused && !audio.ended ? 'playing' : 'paused';
+    const line = discordLy && mode === 'playing' ? dLine : '';
+    return { key: `${t.id}|${mode}|${line}|${seeks}`, t, mode, line };
+  }
+  async function dReconcile() {
+    if (dBusy) { dDirty = true; return; }
+    const d = dDesired();
+    if (d.key === dSent) return;
+    dBusy = true;
+    try {
+      if (d.mode === 'off' || !d.t) {
+        await invoke('discord_clear').catch(() => {});
+        discordMsg = '';
+      } else {
+        await invoke('discord_update', { title: d.t.title, artist: tr(d.t.artist), playing: d.mode === 'playing', pos: audio?.currentTime ?? 0, dur: d.t.dur, cover: d.t.coverUrl ?? null, line: d.line || null });
+        discordMsg = tr('เชื่อมต่อ Discord แล้ว');
+      }
+      dSent = d.key;
+    } catch (e) {
+      dSent = ''; // ส่งไม่สำเร็จ: heartbeat จะลองใหม่
+      discordMsg = tr(String(e));
+    } finally {
+      dBusy = false;
+      if (dDirty) { dDirty = false; dReconcile(); }
     }
-    const p = audio?.currentTime ?? 0;
-    invoke('discord_update', { title: t.title, artist: tr(t.artist), playing: isPlaying, pos: p, dur: t.dur, cover: t.coverUrl ?? null })
-      .then(() => (discordMsg = tr('เชื่อมต่อ Discord แล้ว')))
-      .catch((e) => (discordMsg = tr(String(e))));
+  }
+  $effect(() => {
+    void [loaded, current?.id, discord, playing, discordLy, dLine, seeks];
+    const h = setTimeout(dReconcile, 400); // รวมเหตุการณ์ที่ซ้อนกัน (เช่น pause→play ตอนเปลี่ยนเพลง) ให้เหลือสถานะสุดท้าย
+    return () => clearTimeout(h);
+  });
+  $effect(() => {
+    const h = setInterval(dReconcile, 10000);
+    return () => clearInterval(h);
   });
 
   // ปุ่มทดสอบ: ส่งสถานะตัวอย่างไป Discord 8 วินาที แล้วกลับไปแสดงเพลงจริง (หรือล้างถ้าไม่ได้เล่นอะไร)
@@ -340,6 +371,27 @@
   let bgUrl = $state('');
   let bgBusy = $state(false);
   let bgMsg = $state('');
+  // ใช้โทนสีจากรูปพื้นหลัง (GIF ใช้เฟรมแรก) สร้างสีเน้น/พื้นแผงให้เข้ากัน
+  function matchBg() {
+    if (!look.bg) return;
+    bgMsg = '';
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const c = document.createElement('canvas');
+        c.width = c.height = 48;
+        const x = c.getContext('2d')!;
+        x.drawImage(img, 0, 0, 48, 48);
+        look = { ...look, ...paletteFromPixels(x.getImageData(0, 0, 48, 48).data) };
+        bgMsg = tr('ปรับสีตามรูปแล้ว');
+      } catch {
+        bgMsg = tr('อ่านสีจากรูปนี้ไม่ได้');
+      }
+    };
+    img.onerror = () => (bgMsg = tr('อ่านสีจากรูปนี้ไม่ได้'));
+    img.src = convertFileSrc(look.bg);
+  }
   async function setBg(source: string) {
     bgBusy = true;
     bgMsg = '';
@@ -462,9 +514,27 @@
     if (current?.id === t.id) ly = r;
   }
   $effect(() => {
-    if (panel === 'lyrics' && current) loadLyrics(current);
+    if ((panel === 'lyrics' || (discord && discordLy)) && current) loadLyrics(current);
   });
   const lyIdx = $derived(ly.lines.length ? lrcIndex(ly.lines, pos) : -1);
+  // ---------- เนื้อเพลงใน Discord: เลือกบรรทัดล่วงหน้า 1.5 วินาที (กันหน่วง) และส่งไม่ถี่กว่า 5 วินาทีต่อครั้ง ----------
+  const dIdx = $derived(discord && discordLy && playing && ly.status === 'ready' && ly.lines.length ? lrcIndex(ly.lines, pos + 1.5) : -1);
+  let dLast = 0;
+  $effect(() => {
+    void current?.id; // เปลี่ยนเพลง: ล้างบรรทัดเก่าทันที
+    dLine = '';
+    dLast = 0;
+  });
+  $effect(() => {
+    const want = dIdx >= 0 ? ly.lines[dIdx].text.trim() : '';
+    if (want === untrack(() => dLine)) return;
+    const timer = setTimeout(() => {
+      dLine = want;
+      dLast = Date.now();
+    }, Math.max(0, 5000 - (Date.now() - dLast)));
+    return () => clearTimeout(timer);
+  });
+
   $effect(() => {
     if (lyIdx < 0 || panel !== 'lyrics') return;
     const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -849,7 +919,7 @@
 <audio
   bind:this={audio}
   onplay={() => (playing = true)}
-  onpause={() => (playing = false)}
+  onpause={() => !audio?.ended && (playing = false)}
   ontimeupdate={onTime}
   onloadedmetadata={onMeta}
   onseeked={() => seeks++}
@@ -880,8 +950,7 @@
       class:sel={selected === t.id}
       class:now={current?.id === t.id}
       class:gone={missing.includes(t.id)}
-      onclick={() => (selected = t.id)}
-      ondblclick={() => play(t, list)}
+      onclick={() => ((selected = t.id), play(t, list))}
       oncontextmenu={(e) => menu(e, t, plId)}
       onkeydown={(e) => e.target === e.currentTarget && e.key === 'Enter' && play(t, list)}
     >
@@ -1063,6 +1132,10 @@
         <label class="switch"><input type="checkbox" name="discord" bind:checked={discord} /><span>{discord ? tr('เปิด') : tr('ปิด')}</span></label>
         <button class="ghost" onclick={testDiscord}>{tr('เชื่อมต่อ / ทดสอบ')}</button>
       </div>
+      <div class="tool">
+        <div><b>{tr('แสดงเนื้อเพลงในสถานะ Discord')}</b><small class="dim">{tr('บรรทัดเนื้อเพลงจะขึ้นใต้ชื่อเพลง (ต้องเป็นเพลงที่มีเนื้อแบบมีเวลา) อาจช้ากว่าเสียงเล็กน้อยเพราะ Discord จำกัดความถี่ในการอัปเดต')}</small></div>
+        <label class="switch"><input type="checkbox" name="discordly" bind:checked={discordLy} disabled={!discord} /><span>{discordLy ? tr('เปิด') : tr('ปิด')}</span></label>
+      </div>
       <p class="dim" role="status" aria-live="polite">{discord ? discordMsg : ''}</p>
       <h2>{tr('ส่งออกคลังเพลง')}</h2>
       <div class="tool">
@@ -1101,6 +1174,7 @@
         <button class="ghost" disabled={bgBusy} onclick={pickBg}>{tr('เลือกรูป…')}</button>
         <input type="url" name="bgurl" autocomplete="off" spellcheck="false" aria-label={tr('ลิงก์รูปพื้นหลัง')} placeholder={tr('หรือวางลิงก์รูป…')} bind:value={bgUrl} />
         <button class="ghost" disabled={bgBusy || !bgUrl.trim()} onclick={() => setBg(bgUrl)}>{tr('ใช้รูปนี้')}</button>
+        {#if look.bg}<button class="ghost" onclick={matchBg}>{tr('ปรับสีตามรูป')}</button>{/if}
         {#if look.bg}<button class="ghost danger" onclick={() => (look.bg = '')}>{tr('เอารูปออก')}</button>{/if}
       </div>
       <p class="errtxt" role="status">{bgMsg}</p>
@@ -1198,7 +1272,7 @@
         {/if}
         <small class="dim">{tr('ถัดไป')}</small>
         {#each queue as t (t.id)}
-          <button class="qrow" ondblclick={() => play(t, srcIds ? srcTracks : undefined)} oncontextmenu={(e) => menu(e, t)}>
+          <button class="qrow" onclick={() => play(t, srcIds ? srcTracks : undefined)} oncontextmenu={(e) => menu(e, t)}>
             <span class="thumb" style:background={art(t)}></span>
             <span class="two"><b>{t.title}</b><small>{tr(t.artist)}</small></span>
           </button>
@@ -1209,7 +1283,8 @@
 
   <!-- แถบเล่นเพลง -->
   <footer class="npbar panel">
-    <div class="np-left">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="np-left" oncontextmenu={(e) => current && menu(e, current)}>
       {#if current}
         <span class="thumb big" style:background={art(current)}></span>
         <span class="two"><b>{current.title}</b><small>{tr(current.artist)}</small></span>
