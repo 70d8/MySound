@@ -45,7 +45,7 @@ struct Progress {
 
 fn run_download(app: &AppHandle, id: u64, url: &str, playlist: bool) -> Result<usize, String> {
     let music = data_dir(app)?.join("music");
-    let mut cmd = Command::new("yt-dlp");
+    let mut cmd = Command::new(tool_path("yt-dlp"));
     cmd.args([if playlist { "--yes-playlist" } else { "--no-playlist" }, "--newline", "--progress", "--encoding", "utf-8"])
         // เสียงอย่างเดียว เลือก m4a ก่อน (เล่นได้ใน WebView2 โดยไม่ต้องใช้ ffmpeg)
         .args(["-f", "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio"])
@@ -221,9 +221,19 @@ async fn download(app: AppHandle, id: u64, url: String, playlist: bool) -> Resul
 
 // ---------- เครื่องมือ: ตรวจไฟล์ / ลบ / เวอร์ชัน / อัปเดต / ffmpeg / ส่งออก ----------
 
+/// หาเครื่องมือในโฟลเดอร์ bin ข้างตัวโปรแกรมก่อน (ตัวติดตั้งแพ็กมาให้) ไม่เจอค่อยใช้ที่ติดตั้งในเครื่อง (PATH)
+fn tool_path(name: &str) -> std::ffi::OsString {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("bin").join(format!("{name}.exe"))))
+        .filter(|p| p.is_file())
+        .map(Into::into)
+        .unwrap_or_else(|| name.into())
+}
+
 fn tool(name: &str) -> Command {
     #[allow(unused_mut)]
-    let mut c = Command::new(name);
+    let mut c = Command::new(tool_path(name));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
