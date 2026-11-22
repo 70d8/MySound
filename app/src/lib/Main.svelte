@@ -914,7 +914,7 @@
   const missingTracks = $derived(library.filter((t) => missing.includes(t.id)));
 </script>
 
-<svelte:window onkeydown={onKey} onkeyup={onKeyUp} onpaste={onPaste} onclick={() => (ctx = null)} oncontextmenu={(e) => e.defaultPrevented || (ctx = null)} />
+<svelte:window onkeydown={onKey} onkeyup={onKeyUp} onpaste={onPaste} onclick={() => (ctx = null)} oncontextmenu={(e) => { if (e.defaultPrevented) return; ctx = null; if (!(e.target as HTMLElement)?.closest?.('input,textarea,[contenteditable]')) e.preventDefault(); }} />
 
 <audio
   bind:this={audio}
