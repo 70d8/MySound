@@ -90,7 +90,7 @@ fun MiniPlayer(vm: MainViewModel, t: Track, onOpen: () -> Unit) {
 @Composable
 fun NowPlaying(vm: MainViewModel, t: Track, onClose: () -> Unit) {
     var lyricsOn by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(t.id, lyricsOn) { if (lyricsOn) vm.loadLyrics(t) }
+    LaunchedEffect(t.id) { vm.loadLyrics(t) } // โหลดไว้เลย เพื่อแสดงบรรทัดที่กำลังร้องใต้แถบเวลา
 
     val tint = rememberTint(t.title, t.cover)
     val base = MaterialTheme.colorScheme.background
@@ -140,6 +140,20 @@ fun NowPlaying(vm: MainViewModel, t: Track, onClose: () -> Unit) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(fmt((drag ?: vm.positionMs.toFloat()).toLong()), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(fmt(vm.durationMs), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            // บรรทัดเนื้อเพลงที่กำลังร้อง (ซ่อนเมื่อเปิดแผงเนื้อเพลงเต็มอยู่แล้ว)
+            val synced = vm.lyrics?.synced.orEmpty().takeIf { vm.lyricsFor == t.id }.orEmpty()
+            if (!lyricsOn && synced.isNotEmpty()) {
+                val line = synced.lastOrNull { it.ms <= vm.positionMs + 300 }?.text?.ifBlank { "♪" }
+                Text(
+                    line ?: "",
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    textAlign = TextAlign.Center,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {

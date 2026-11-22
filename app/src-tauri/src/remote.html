@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#111214">
+<title>MySound Remote</title>
+<style>
+  :root { color-scheme: dark; --acc: #5eead4; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, 'Noto Sans Thai', sans-serif; background: #111214; color: #eee; }
+  header { position: sticky; top: 0; padding: 16px; background: #1a1b1e; box-shadow: 0 4px 12px rgba(0,0,0,.4); }
+  h1 { margin: 0; font-size: 1.15rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ar { color: #aaa; font-size: .9rem; margin: 2px 0 10px; }
+  .ctl { display: flex; justify-content: center; align-items: center; gap: 18px; margin: 8px 0; }
+  button { touch-action: manipulation; font: inherit; color: inherit; background: #2a2b30; border: 0; border-radius: 999px; width: 56px; height: 56px; font-size: 1.3rem; }
+  button:active { transform: scale(.95); }
+  .play { width: 72px; height: 72px; background: var(--acc); color: #000; font-size: 1.6rem; }
+  input[type=range] { width: 100%; accent-color: var(--acc); }
+  .row { display: flex; align-items: center; gap: 8px; font-size: .8rem; color: #aaa; font-variant-numeric: tabular-nums; }
+  input[type=search] { width: 100%; padding: 12px 14px; border-radius: 10px; border: 0; background: #2a2b30; color: #eee; font: inherit; margin-top: 8px; }
+  ul { list-style: none; margin: 0; padding: 8px; }
+  li { padding: 12px 10px; border-bottom: 1px solid #222; }
+  li b { display: block; } li small { color: #999; }
+  li.on b { color: var(--acc); }
+  .off { padding: 24px; text-align: center; color: #f88; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="t">MySound</h1>
+  <div class="ar" id="a"></div>
+  <div class="row"><span id="p">0:00</span><input id="seek" type="range" min="0" max="1" step="1" aria-label="seek"><span id="d">0:00</span></div>
+  <div class="ctl">
+    <button aria-label="previous" onclick="cmd('prev')">⏮</button>
+    <button class="play" id="pl" aria-label="play/pause" onclick="cmd('toggle')">▶</button>
+    <button aria-label="next" onclick="cmd('next')">⏭</button>
+  </div>
+  <div class="row">🔈<input id="vol" type="range" min="0" max="100" aria-label="volume">🔊</div>
+  <input id="q" type="search" placeholder="ค้นหาเพลง / Search…" autocomplete="off">
+</header>
+<div id="off" class="off" hidden>เชื่อมต่อแอปไม่ได้ / Can’t reach the app</div>
+<ul id="list"></ul>
+<script>
+  const k = new URLSearchParams(location.search).get('k');
+  const $ = (id) => document.getElementById(id);
+  const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+  let st = { tracks: [] }, dragging = false, lastList = '';
+  function cmd(c, v) { fetch(`/api/cmd?k=${k}&c=${c}${v !== undefined ? '&v=' + v : ''}`).then(() => setTimeout(poll, 250)); }
+  $('seek').oninput = () => (dragging = true);
+  $('seek').onchange = (e) => { dragging = false; cmd('seek', e.target.value); };
+  $('vol').onchange = (e) => cmd('vol', e.target.value);
+  $('q').oninput = render;
+  function render() {
+    const q = $('q').value.trim().toLowerCase();
+    const ts = (st.tracks || []).filter((t) => !q || (t.t + ' ' + t.a).toLowerCase().includes(q)).slice(0, 200);
+    const key = q + '|' + st.id + '|' + ts.length + '|' + (st.tracks || []).length;
+    if (key === lastList) return;
+    lastList = key;
+    const ul = $('list'); ul.textContent = '';
+    for (const t of ts) {
+      const li = document.createElement('li');
+      li.className = t.i === st.id ? 'on' : '';
+      const b = document.createElement('b'); b.textContent = t.t;
+      const s = document.createElement('small'); s.textContent = t.a;
+      li.append(b, s); li.onclick = () => cmd('play', t.i);
+      ul.append(li);
+    }
+  }
+  async function poll() {
+    try {
+      st = await (await fetch(`/api/state?k=${k}`)).json();
+      $('off').hidden = true;
+      $('t').textContent = st.title || 'MySound'; $('a').textContent = st.artist || '';
+      $('pl').textContent = st.playing ? '⏸' : '▶';
+      $('seek').max = st.dur || 1; if (!dragging) $('seek').value = st.pos || 0;
+      $('p').textContent = fmt(st.pos || 0); $('d').textContent = fmt(st.dur || 0);
+      if (document.activeElement !== $('vol')) $('vol').value = st.vol ?? 70;
+      if (st.accent) document.documentElement.style.setProperty('--acc', st.accent);
+      render();
+    } catch { $('off').hidden = false; }
+  }
+  poll(); setInterval(poll, 1000);
+</script>
+</body>
+</html>

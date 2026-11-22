@@ -12,6 +12,11 @@ export type Look = {
   tint: boolean; // ไล่สีแผงขวาตามปกเพลง
   startPanel: boolean; // เปิดแผงคิวตอนเริ่มแอป
   viz: boolean; // ตัวแสดงคลื่นเสียง
+  vizStyle: 'bars' | 'wave' | 'circle'; // รูปแบบคลื่นเสียง
+  gap: number; // px ช่องไฟระหว่างแผง
+  fontFace: 'system' | 'leelawadee' | 'sarabun' | 'noto'; // ฟอนต์
+  listMode: 'rows' | 'grid'; // รายการเพลงแบบแถวหรือแบบการ์ด
+  hc: boolean; // คอนทราสต์สูง
   bg: string; // พาธรูปพื้นหลัง (ไฟล์ในโฟลเดอร์เพลงของแอป) ว่าง = ไม่ใช้
   bgAlpha: number; // % ความทึบของแผงเมื่อมีรูปพื้นหลัง (ต่ำ = เห็นรูปมาก)
   bgBlur: number; // px เบลอรูปพื้นหลัง
@@ -38,6 +43,11 @@ export const DEFAULT_LOOK: Look = {
   tint: true,
   startPanel: true,
   viz: true,
+  vizStyle: 'bars',
+  gap: 8,
+  fontFace: 'system',
+  listMode: 'rows',
+  hc: false,
   bg: '',
   bgAlpha: 60,
   bgBlur: 0
@@ -63,6 +73,11 @@ export function normalizeLook(x: Partial<Look> | null | undefined): Look {
     tint: o.tint ?? d.tint,
     startPanel: o.startPanel ?? d.startPanel,
     viz: o.viz ?? d.viz,
+    vizStyle: o.vizStyle === 'wave' || o.vizStyle === 'circle' ? o.vizStyle : 'bars',
+    gap: num(o.gap, 0, 16, d.gap),
+    fontFace: o.fontFace === 'leelawadee' || o.fontFace === 'sarabun' || o.fontFace === 'noto' ? o.fontFace : 'system',
+    listMode: o.listMode === 'grid' ? 'grid' : 'rows',
+    hc: !!o.hc,
     bg: typeof o.bg === 'string' ? o.bg : '',
     bgAlpha: num(o.bgAlpha, 15, 100, d.bgAlpha),
     bgBlur: num(o.bgBlur, 0, 24, d.bgBlur)
@@ -77,28 +92,56 @@ export function lum(h: string): number {
 export const isLight = (l: Look) => lum(l.base) > 0.4;
 
 /** ตัวแปร CSS ทั้งหมดที่ได้จากค่าที่ผู้ใช้เลือก (ตัวอักษร/เส้น/พื้นตอนชี้ คำนวณให้เอง) */
+/** อัตราส่วนคอนทราสต์ WCAG ระหว่างสองสี */
+export function contrast(a: string, b: string): number {
+  const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
+  return (x + 0.05) / (y + 0.05);
+}
+/** เลื่อนสีเข้าหาขาว/ดำทีละ 8% จนคอนทราสต์กับพื้นถึงเกณฑ์ (สีเน้นต้องอ่านออกบนพื้นแผง) */
+export function ensureContrast(fg: string, bg: string, min: number): string {
+  if (contrast(fg, bg) >= min) return fg;
+  const toward = lum(bg) > 0.4 ? 0 : 255;
+  const c = [1, 3, 5].map((i) => parseInt(fg.slice(i, i + 2), 16));
+  for (let k = 1; k <= 12; k++) {
+    const m = c.map((v) => Math.round(v + (toward - v) * k * 0.08));
+    const h = '#' + m.map((v) => v.toString(16).padStart(2, '0')).join('');
+    if (contrast(h, bg) >= min) return h;
+  }
+  return toward ? '#ffffff' : '#000000';
+}
+const FONTS: Record<Look['fontFace'], string> = {
+  system: "Inter, 'Segoe UI', 'Leelawadee UI', system-ui, sans-serif",
+  leelawadee: "'Leelawadee UI', 'Segoe UI', system-ui, sans-serif",
+  sarabun: "'Sarabun', 'Segoe UI', system-ui, sans-serif",
+  noto: "'Noto Sans Thai', 'Segoe UI', system-ui, sans-serif"
+};
+
 export function lookVars(l: Look): Record<string, string> {
   const light = isLight(l);
-  const text = light ? '#14171c' : '#f2f4f7';
+  const text = l.hc ? (light ? '#000000' : '#ffffff') : light ? '#14171c' : '#f2f4f7';
+  const accent = ensureContrast(l.accent, l.base, l.hc ? 4.5 : 3);
+  const alpha = l.hc ? Math.max(l.bgAlpha, 85) : l.bgAlpha;
   return {
     '--bg-base': l.base,
-    '--panel-bg': l.bg ? `color-mix(in srgb, ${l.base} ${l.bgAlpha}%, transparent)` : l.base,
+    '--panel-bg': l.bg ? `color-mix(in srgb, ${l.base} ${alpha}%, transparent)` : l.base,
     '--bg-raised': l.raised,
     '--bg-hover': `color-mix(in srgb, ${l.raised} 86%, ${text})`,
     '--bg-outer': l.outer,
     '--text': text,
-    '--text-dim': light ? '#5b6472' : '#9aa3af',
-    '--accent': l.accent,
-    '--on-accent': lum(l.accent) > 0.35 ? '#04201c' : '#ffffff',
-    '--line': `color-mix(in srgb, ${text} 8%, transparent)`,
-    '--line2': `color-mix(in srgb, ${text} 13%, transparent)`,
-    '--line3': `color-mix(in srgb, ${text} 18%, transparent)`,
+    '--text-dim': l.hc ? (light ? '#2b3138' : '#d5dae1') : light ? '#5b6472' : '#9aa3af',
+    '--accent': accent,
+    '--on-accent': lum(accent) > 0.35 ? '#04201c' : '#ffffff',
+    '--line': `color-mix(in srgb, ${text} ${l.hc ? 22 : 8}%, transparent)`,
+    '--line2': `color-mix(in srgb, ${text} ${l.hc ? 32 : 13}%, transparent)`,
+    '--line3': `color-mix(in srgb, ${text} ${l.hc ? 42 : 18}%, transparent)`,
     '--danger': light ? '#dc2626' : '#f87171',
     '--radius-panel': `${l.radius}px`,
     '--radius-card': `${Math.max(2, Math.round(l.radius * 0.75))}px`,
     '--sidebar-w': `${l.sidebar}px`,
     '--right-w': `${l.right}px`,
-    '--row-h': `${l.row}px`
+    '--row-h': `${l.row}px`,
+    '--gap': `${l.gap}px`,
+    '--font': FONTS[l.fontFace]
   };
 }
 

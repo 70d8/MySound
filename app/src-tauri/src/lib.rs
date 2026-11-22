@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter, Manager};
 use ytdlp::Line;
+mod extra;
 
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let d = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -472,7 +473,7 @@ async fn check_update() -> Result<Option<UpdateInfo>, String> {
 
 /// โหลดตัวติดตั้งจาก GitHub Releases ของโปรเจกต์นี้เท่านั้น แล้วเปิดมัน และปิดแอปให้ตัวติดตั้งแทนที่ไฟล์ได้
 #[tauri::command]
-async fn install_update(app: AppHandle, url: String) -> Result<(), String> {
+async fn install_update(app: AppHandle, url: String, silent: Option<bool>) -> Result<(), String> {
     if !url.starts_with(RELEASE_DL_PREFIX) || !url.ends_with("_x64-setup.exe") {
         return Err("ลิงก์อัปเดตไม่ถูกต้อง".into());
     }
@@ -485,9 +486,234 @@ async fn install_update(app: AppHandle, url: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())??;
-    Command::new(&path).spawn().map_err(|e| format!("เปิดตัวติดตั้งไม่ได้: {e}"))?;
+    if silent.unwrap_or(false) {
+        // ติดตั้งเงียบ (/S) แล้วเปิดแอปใหม่เมื่อเสร็จ
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let script = format!("start \"\" /wait \"{}\" /S & start \"\" \"{}\"", path.display(), exe.display());
+        let mut c = Command::new("cmd");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0800_0000);
+            c.arg("/C").raw_arg(format!("\"{script}\"")); // ส่งข้อความตรงๆ ให้ cmd ไม่ให้ Rust ใส่ \" เพิ่ม
+        }
+        #[cfg(not(windows))]
+        let _ = &script;
+        c.spawn().map_err(|e| format!("เปิดตัวติดตั้งไม่ได้: {e}"))?;
+    } else {
+        Command::new(&path).spawn().map_err(|e| format!("เปิดตัวติดตั้งไม่ได้: {e}"))?;
+    }
     app.exit(0);
     Ok(())
+}
+
+// ---------- พื้นที่เก็บข้อมูล / ซ่อมไฟล์ที่หาย ----------
+
+#[derive(serde::Serialize)]
+struct Storage {
+    audio: u64,
+    covers: u64,
+    other: u64,
+    library: u64,
+    orphans: Vec<String>,
+    orphan_bytes: u64,
+}
+
+const AUDIO_EXT: [&str; 9] = ["m4a", "mp3", "webm", "opus", "wav", "flac", "ogg", "aac", "mp4"];
+
+/// ขนาดไฟล์ในโฟลเดอร์ music แยกประเภท + ไฟล์ที่ไม่มีเพลงไหนในคลังใช้แล้ว (keep = พาธที่ยังใช้อยู่)
+#[tauri::command]
+fn storage_info(app: AppHandle, keep: Vec<String>) -> Result<Storage, String> {
+    let dir = data_dir(&app)?;
+    let keep: std::collections::HashSet<String> = keep
+        .iter()
+        .filter_map(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_lowercase()))
+        .collect();
+    let mut s = Storage { audio: 0, covers: 0, other: 0, library: 0, orphans: vec![], orphan_bytes: 0 };
+    s.library = std::fs::metadata(dir.join("library.json")).map(|m| m.len()).unwrap_or(0);
+    for e in std::fs::read_dir(dir.join("music")).map_err(|e| e.to_string())?.flatten() {
+        let Ok(m) = e.metadata() else { continue };
+        if !m.is_file() { continue; }
+        let name = e.file_name().to_string_lossy().to_string();
+        let lower = name.to_lowercase();
+        let ext = lower.rsplit('.').next().unwrap_or("");
+        if lower.contains(".cover.") || lower.starts_with("bg.") { s.covers += m.len(); } else if AUDIO_EXT.contains(&ext) { s.audio += m.len(); } else { s.other += m.len(); }
+        if !keep.contains(&lower) && !lower.ends_with(".part") {
+            s.orphans.push(e.path().display().to_string());
+            s.orphan_bytes += m.len();
+        }
+    }
+    Ok(s)
+}
+
+/// ค้นไฟล์ตามชื่อในโฟลเดอร์ที่ผู้ใช้เลือก (ลึกไม่เกิน 6 ชั้น) แล้วคัดลอกกลับเข้าโฟลเดอร์ music ของแอป
+#[tauri::command]
+async fn relink(app: AppHandle, dir: String, names: Vec<String>) -> Result<Vec<(String, String)>, String> {
+    let music = data_dir(&app)?.join("music");
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut want: std::collections::HashSet<String> = names.into_iter().map(|n| n.to_lowercase()).collect();
+        let mut found = vec![];
+        let mut stack = vec![(std::path::PathBuf::from(dir), 0u8)];
+        while let Some((d, depth)) = stack.pop() {
+            if want.is_empty() { break; }
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                let Ok(ft) = e.file_type() else { continue };
+                if ft.is_dir() { if depth < 6 { stack.push((p, depth + 1)); } continue; }
+                let name = e.file_name().to_string_lossy().to_string();
+                if want.remove(&name.to_lowercase()) {
+                    let dest = music.join(&name);
+                    if !dest.exists() && std::fs::copy(&p, &dest).is_err() { continue; }
+                    found.push((name, dest.display().to_string()));
+                }
+            }
+        }
+        Ok(found)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------- แคชเนื้อเพลงบนดิสก์ (ใช้ออฟไลน์ได้) / ส่งออก .lrc ----------
+
+#[tauri::command]
+fn lyrics_cache_read(app: AppHandle) -> Result<String, String> {
+    match std::fs::read_to_string(data_dir(&app)?.join("lyrics-cache.json")) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+fn lyrics_cache_write(app: AppHandle, json: String) -> Result<(), String> {
+    let dir = data_dir(&app)?;
+    let tmp = dir.join("lyrics-cache.json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, dir.join("lyrics-cache.json")).map_err(|e| e.to_string())
+}
+
+/// เขียนไฟล์ .lrc ลงโฟลเดอร์ที่ผู้ใช้เลือก (ชื่อไฟล์ผ่าน safe_name, ไม่เขียนทับไฟล์ที่มีอยู่)
+#[tauri::command]
+fn write_lrc_files(dir: String, items: Vec<(String, String)>) -> Result<usize, String> {
+    let dir = std::path::PathBuf::from(dir);
+    if !dir.is_dir() { return Err("ไม่พบโฟลเดอร์ปลายทาง".into()); }
+    let mut n = 0;
+    for (name, text) in items {
+        let base = safe_name(&name);
+        if base.is_empty() { continue; }
+        let mut p = dir.join(format!("{base}.lrc"));
+        let mut k = 2;
+        while p.exists() { p = dir.join(format!("{base} ({k}).lrc")); k += 1; }
+        if std::fs::write(&p, text).is_ok() { n += 1; }
+    }
+    Ok(n)
+}
+
+// ---------- นำเข้าไฟล์เพลงจากเครื่อง (ลากมาวาง / Open with / โฟลเดอร์เฝ้าดู / M3U) ----------
+
+#[derive(serde::Serialize)]
+struct Imported {
+    src: String,
+    title: String,
+    artist: String,
+    album: String,
+    dur: f64,
+    path: String,
+    cover: Option<String>,
+    lrc: Option<String>,
+}
+
+fn is_audio(p: &std::path::Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).map(|e| AUDIO_EXT.contains(&e.to_lowercase().as_str())).unwrap_or(false)
+}
+
+/// อ่านความยาวและแท็ก (title/artist/album) ด้วย ffprobe; ไม่มี ffprobe ก็คืนค่าว่าง
+fn probe(p: &std::path::Path) -> (f64, std::collections::HashMap<String, String>) {
+    let Ok(out) = tool("ffprobe").args(["-v", "quiet", "-print_format", "json", "-show_format"]).arg(p).output() else { return (0.0, Default::default()) };
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let dur = v["format"]["duration"].as_str().and_then(|d| d.parse().ok()).unwrap_or(0.0);
+    let tags = v["format"]["tags"].as_object().map(|m| m.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.to_lowercase(), s.trim().to_string()))).collect()).unwrap_or_default();
+    (dur, tags)
+}
+
+fn import_one(music: &std::path::Path, src: &std::path::Path, n: usize) -> Result<Imported, String> {
+    if !src.is_file() || !is_audio(src) { return Err("not audio".into()); }
+    let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("m4a").to_lowercase();
+    let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let dest = if src.starts_with(music) {
+        src.to_path_buf()
+    } else {
+        let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+        let d = music.join(format!("local-{millis}-{n}.{ext}"));
+        std::fs::copy(src, &d).map_err(|e| e.to_string())?;
+        d
+    };
+    let (dur, tags) = probe(&dest);
+    let get = |k: &str| tags.get(k).filter(|v| !v.is_empty()).cloned();
+    // ปกที่ฝังในไฟล์ (ถ้ามี)
+    let cover_p = dest.with_extension("cover.jpg");
+    let cover = ffmpeg(&[std::ffi::OsStr::new("-i"), dest.as_os_str(), std::ffi::OsStr::new("-an"), std::ffi::OsStr::new("-frames:v"), std::ffi::OsStr::new("1"), cover_p.as_os_str()])
+        .ok()
+        .filter(|_| cover_p.is_file())
+        .map(|_| cover_p.display().to_string());
+    // ไฟล์ .lrc ชื่อเดียวกันวางข้างไฟล์เพลง
+    let lrc = std::fs::read_to_string(src.with_extension("lrc")).ok().filter(|t| t.len() < 1_000_000);
+    Ok(Imported {
+        src: src.display().to_string(),
+        title: get("title").unwrap_or(stem),
+        artist: get("artist").or_else(|| get("album_artist")).unwrap_or_default(),
+        album: get("album").unwrap_or_default(),
+        dur,
+        path: dest.display().to_string(),
+        cover,
+        lrc,
+    })
+}
+
+#[tauri::command]
+async fn import_files(app: AppHandle, paths: Vec<String>) -> Result<Vec<Imported>, String> {
+    let music = data_dir(&app)?.join("music");
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(paths.iter().enumerate().filter_map(|(i, p)| import_one(&music, std::path::Path::new(p), i).ok()).collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// รายชื่อไฟล์เสียงในโฟลเดอร์ (ลึกไม่เกิน 4 ชั้น, สูงสุด 5000 ไฟล์)
+#[tauri::command]
+fn scan_folder(dir: String) -> Vec<String> {
+    let mut out = vec![];
+    let mut stack = vec![(PathBuf::from(dir), 0u8)];
+    while let Some((d, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() { if depth < 4 { stack.push((p, depth + 1)); } } else if is_audio(&p) { out.push(p.display().to_string()); }
+            if out.len() >= 5000 { return out; }
+        }
+    }
+    out
+}
+
+/// เขียนไฟล์ข้อความที่ผู้ใช้เลือกที่เก็บเอง (สำรองคลัง / เพลย์ลิสต์) จำกัดนามสกุล
+#[tauri::command]
+fn save_text(path: String, text: String) -> Result<(), String> {
+    let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if !["json", "m3u", "m3u8", "mysound", "txt", "csv"].contains(&ext.as_str()) { return Err("นามสกุลไฟล์นี้ไม่รองรับ".into()); }
+    std::fs::write(path, text).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn load_text(path: String) -> Result<String, String> {
+    let p = std::path::Path::new(&path);
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if !["json", "m3u", "m3u8", "mysound", "txt", "csv", "lrc"].contains(&ext.as_str()) { return Err("นามสกุลไฟล์นี้ไม่รองรับ".into()); }
+    if std::fs::metadata(p).map_err(|e| e.to_string())?.len() > 50_000_000 { return Err("ไฟล์ใหญ่เกินไป".into()); }
+    let b = std::fs::read(p).map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(b.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&b)).into_owned())
 }
 
 #[cfg(test)]
@@ -583,7 +809,7 @@ fn dtitle(s: &str) -> String {
 }
 
 #[tauri::command]
-async fn discord_update(state: tauri::State<'_, Discord>, title: String, artist: String, playing: bool, pos: f64, dur: f64, cover: Option<String>, line: Option<String>) -> Result<(), String> {
+async fn discord_update(state: tauri::State<'_, Discord>, title: String, artist: String, playing: bool, pos: f64, dur: f64, cover: Option<String>, line: Option<String>, url: Option<String>) -> Result<(), String> {
     let cell = state.0.clone();
     // ต่อ/ส่งผ่าน IPC เป็นงาน blocking: ย้ายไป thread แยก ไม่ให้ค้าง runtime ถ้า Discord ตอบช้า
     tauri::async_runtime::spawn_blocking(move || {
@@ -605,6 +831,11 @@ async fn discord_update(state: tauri::State<'_, Discord>, title: String, artist:
                 if line.is_some() { if let Some(t) = dtext(&artist) { assets = assets.large_text(t); } } // ศิลปินย้ายไปแสดงตอนชี้รูปปก
                 a = a.assets(assets);
             }
+            // ปุ่มใต้สถานะ: เปิดเพลงนี้บน YouTube/SoundCloud (หรือค้นบน YouTube ถ้าเป็นไฟล์ในเครื่อง)
+            let link = url.clone().filter(|u| u.starts_with("https://") && u.len() < 500)
+                .unwrap_or_else(|| format!("https://www.youtube.com/results?search_query={}", url::form_urlencoded::byte_serialize(format!("{artist} {title}").as_bytes()).collect::<String>()));
+            let label = if link.contains("soundcloud.com") { "Listen on SoundCloud" } else if link.contains("/results?") { "Search on YouTube" } else { "Listen on YouTube" };
+            a = a.buttons(vec![discord_rich_presence::activity::Button::new(label, link)]);
             if playing {
                 // มีบรรทัดเนื้อเพลง: ใช้แทนชื่อศิลปินในบรรทัดที่สอง
                 if let Some(t) = line.as_deref().and_then(dtext).or_else(|| dtext(&artist)) { a = a.state(t); }
@@ -694,9 +925,77 @@ fn read_text_file(path: String) -> Result<String, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // เปิดแอปซ้ำ: ไม่เปิดหน้าต่างใหม่ แค่ดึงหน้าต่างเดิมขึ้นมา (และส่งไฟล์ที่สั่งเปิดไปให้)
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            show_main(app);
+            let files: Vec<String> = argv.into_iter().skip(1).filter(|a| !a.starts_with("--")).collect();
+            if !files.is_empty() { let _ = app.emit("open-files", files); }
+        }))
         .manage(Discord::default())
+        .manage(extra::Remote::default())
+        .manage(extra::Whisper::default())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![read_library, write_library, download, genius_cover, import_cover, missing_files, delete_files, tool_version, ytdlp_update, process_audio, export_library, lyrics, discord_update, discord_clear, check_update, install_update, search_online, read_text_file])
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            build_tray(app.handle())?;
+            if std::env::args().any(|a| a == "--minimized") {
+                if let Some(w) = app.get_webview_window("main") { let _ = w.hide(); }
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![read_library, write_library, download, genius_cover, import_cover, missing_files, delete_files, tool_version, ytdlp_update, process_audio, export_library, lyrics, discord_update, discord_clear, check_update, install_update, storage_info, relink, lyrics_cache_read, lyrics_cache_write, write_lrc_files, search_online, read_text_file, launch_files, tray_tooltip, import_files, scan_folder, save_text, load_text, extra::open_url, extra::save_png, extra::yt_info, extra::cut_audio, extra::convert_mp3, extra::import_bg_video, extra::lastfm_token, extra::lastfm_session, extra::lastfm_track, extra::remote_start, extra::remote_stop, extra::remote_push, extra::whisper_status, extra::whisper_setup, extra::whisper_run, extra::whisper_cancel])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// ไฟล์ที่ส่งมาตอนเปิดแอป (เช่น คลิกขวาไฟล์เพลง > Open with MySound)
+#[tauri::command]
+fn launch_files() -> Vec<String> {
+    std::env::args().skip(1).filter(|a| !a.starts_with("--")).collect()
+}
+
+/// ไอคอนถาดระบบ: คลิกซ้าย = เปิดหน้าต่าง, คลิกขวา = เมนูควบคุมเพลง
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    let item = |id: &str, label: &str| MenuItem::with_id(app, id, label, true, None::<&str>);
+    let menu = Menu::with_items(app, &[
+        &item("show", "Open MySound")?,
+        &PredefinedMenuItem::separator(app)?,
+        &item("toggle", "Play / Pause")?,
+        &item("next", "Next")?,
+        &item("prev", "Previous")?,
+        &PredefinedMenuItem::separator(app)?,
+        &item("quit", "Quit")?,
+    ])?;
+    let mut b = TrayIconBuilder::with_id("main").tooltip("MySound").menu(&menu).show_menu_on_left_click(false);
+    if let Some(icon) = app.default_window_icon() { b = b.icon(icon.clone()); }
+    b.on_menu_event(|app, e| match e.id().as_ref() {
+        "show" => show_main(app),
+        "quit" => app.exit(0),
+        cmd => { let _ = app.emit("np-cmd", serde_json::json!({ "cmd": cmd })); }
+    })
+    .on_tray_icon_event(|tray, e| {
+        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
+            show_main(tray.app_handle());
+        }
+    })
+    .build(app)?;
+    Ok(())
+}
+
+/// เปลี่ยนข้อความ tooltip ของไอคอนถาดระบบเป็นชื่อเพลงที่เล่นอยู่
+#[tauri::command]
+fn tray_tooltip(app: AppHandle, text: String) {
+    if let Some(t) = app.tray_by_id("main") { let _ = t.set_tooltip(Some(text.chars().take(120).collect::<String>())); }
 }

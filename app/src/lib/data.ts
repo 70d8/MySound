@@ -4,7 +4,7 @@ export type Track = {
   artist: string;
   album: string;
   dur: number; // วินาที
-  src: 'youtube' | 'soundcloud';
+  src: 'youtube' | 'soundcloud' | 'local';
   added: string; // วันที่เพิ่ม
   last: string; // วันที่ฟังล่าสุด
   plays: number;
@@ -14,11 +14,22 @@ export type Track = {
   fav?: boolean; // ถูกใจ
   rating?: number; // 0-5 ดาว
   lrc?: string; // เนื้อเพลงที่ผู้ใช้ใส่เอง (LRC หรือข้อความธรรมดา)
+  gainDb?: number; // ปรับความดังเพลงนี้เอง (dB)
+  wave?: string; // รูปคลื่นย่อ 120 ช่วง (0–9)
+  bpm?: number | null; // จังหวะ (ตรวจอัตโนมัติ)
+  tags?: string[]; // แท็กที่ตั้งเอง
+  note?: string; // โน้ตส่วนตัว
+  skips?: number; // จำนวนครั้งที่กดข้ามก่อนเล่นถึง 30%
+  skipStart?: number; // ข้ามต้นเพลง (วินาที)
+  skipEnd?: number; // ตัดท้ายเพลง (วินาที)
+  lyOff?: number; // เลื่อนเวลาเนื้อเพลง (วินาที)
+  resume?: number; // ตำแหน่งที่ฟังค้างไว้ (เพลงยาว)
   lufs?: number | null; // ความดังเฉลี่ย (LUFS) ไว้ปรับระดับเสียงให้เท่ากัน
   coverUrl?: string | null; // ลิงก์รูปปกบนเน็ต ไว้ส่งให้ Discord (ไฟล์ในเครื่อง Discord อ่านไม่ได้)
 };
 
-export type Playlist = { id: number; name: string; ids: number[] };
+export type Playlist = { id: number; name: string; ids: number[]; folder?: string; pinned?: boolean; image?: string };
+export type Smart = { id: number; name: string; q: string };
 
 import { convertFileSrc } from '@tauri-apps/api/core';
 
@@ -87,4 +98,27 @@ export function versionAgeDays(v: string, now = new Date()): number | null {
 export function splitArtistTitle(title: string): { artist: string; title: string } | null {
   const m = /^\s*(.{1,80}?)\s+[-–—]\s+(\S.*?)\s*$/.exec(title);
   return m ? { artist: m[1].trim(), title: m[2].trim() } : null;
+}
+
+const TIME_TAG = /^\[\d+:\d+(?:[.:]\d+)?\]$/;
+const META_TAG = /^\[(ar|ti|al|au|by|length|offset|re|ve|#):[^\]]*\]$/i;
+/** ลบป้ายท่อนเพลงในวงเล็บเหลี่ยม เช่น [Intro] [Bridge] [Chorus: Artist] ออก แต่เก็บเวลา [01:23.45] และแท็กข้อมูล [ar:] ไว้
+ *  บรรทัดที่เหลือแต่ป้ายถูกลบทิ้ง และบรรทัดว่างติดกันหลายบรรทัดยุบเหลือบรรทัดเดียว */
+export function cleanLyrics(src: string): string {
+  const out: string[] = [];
+  for (const raw of src.replace(/\r\n?/g, '\n').split('\n')) {
+    const tags = raw.match(/\[[^\]]*\]/g) ?? [];
+    const times = tags.filter((t) => TIME_TAG.test(t));
+    if (tags.length === 1 && META_TAG.test(tags[0]) && raw.trim() === tags[0]) { out.push(raw.trim()); continue; }
+    const text = raw.replace(/\[[^\]]*\]/g, '').replace(/\s{2,}/g, ' ').trim();
+    if (!times.length && !text) {
+      // บรรทัดที่มีแต่ป้าย: ทิ้ง; บรรทัดว่างจริง: เก็บไว้หนึ่งบรรทัดเพื่อคั่นท่อน
+      if (!tags.length && out.length && out[out.length - 1] !== '') out.push('');
+      continue;
+    }
+    out.push(times.join('') + text);
+  }
+  while (out.length && out[out.length - 1] === '') out.pop();
+  while (out.length && out[0] === '') out.shift();
+  return out.join('\n');
 }

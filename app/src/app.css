@@ -21,7 +21,7 @@
   --right-w: 320px;
   --npbar-h: 84px;
   --progress-h: 4px;
-  font-family: Inter, 'Segoe UI', system-ui, sans-serif;
+  font-family: var(--font, Inter, 'Segoe UI', system-ui, sans-serif);
   color: var(--text);
   background: var(--bg-outer);
   color-scheme: dark;

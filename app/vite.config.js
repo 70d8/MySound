@@ -26,7 +26,8 @@ export default defineConfig(() => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 4. ไม่สนไฟล์ชั่วคราวที่ npm install สร้าง/ลบ (กันจอ error ตอนติดตั้งแพ็กเกจระหว่างรัน dev)
+      ignored: ["**/src-tauri/**", "**/*.tmp", "**/.package-lock.json*", "**/package-lock.json", "**/node_modules/.cache/**", "**/run-dev.bat"],
     },
   },
 }));
