@@ -43,9 +43,21 @@ struct Progress {
     state: &'static str,
 }
 
-fn run_download(app: &AppHandle, id: u64, url: &str, playlist: bool) -> Result<usize, String> {
+/// YouTube ขอให้ล็อกอินยืนยันว่าไม่ใช่บอท: ยืมคุกกี้จากเบราว์เซอร์ที่ผู้ใช้เลือก หรือจากไฟล์ cookies.txt ("file:พาธ")
+fn cookie_args(c: &str) -> Vec<String> {
+    if let Some(path) = c.strip_prefix("file:") {
+        let path = path.trim().trim_matches('"');
+        if !path.is_empty() { return vec!["--cookies".into(), path.into()]; }
+    } else if ["firefox", "edge", "chrome", "brave", "opera", "vivaldi"].contains(&c) {
+        return vec!["--cookies-from-browser".into(), c.into()];
+    }
+    vec![]
+}
+
+fn run_download(app: &AppHandle, id: u64, url: &str, playlist: bool, cookies: &str) -> Result<usize, String> {
     let music = data_dir(app)?.join("music");
     let mut cmd = Command::new(tool_path("yt-dlp"));
+    cmd.args(cookie_args(cookies));
     cmd.args([if playlist { "--yes-playlist" } else { "--no-playlist" }, "--newline", "--progress", "--encoding", "utf-8"])
         // เสียงอย่างเดียว เลือก m4a ก่อน (เล่นได้ใน WebView2 โดยไม่ต้องใช้ ffmpeg)
         .args(["-f", "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio"])
@@ -212,8 +224,8 @@ async fn import_cover(app: AppHandle, key: String, source: String, old: Option<S
 }
 
 #[tauri::command]
-async fn download(app: AppHandle, id: u64, url: String, playlist: bool) -> Result<usize, String> {
-    tauri::async_runtime::spawn_blocking(move || run_download(&app, id, &url, playlist))
+async fn download(app: AppHandle, id: u64, url: String, playlist: bool, cookies: Option<String>) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || run_download(&app, id, &url, playlist, cookies.as_deref().unwrap_or("")))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -409,12 +421,95 @@ async fn export_library(dest: String, items: Vec<ExportItem>) -> Result<ExportRe
     .map_err(|e| e.to_string())?
 }
 
+// ---------- อัปเดตแอป: เช็กรีลีสล่าสุดบน GitHub แล้วโหลดตัวติดตั้งมารันให้ ----------
+
+const RELEASES_API: &str = "https://api.github.com/repos/70d8/MySound/releases?per_page=20";
+const RELEASE_DL_PREFIX: &str = "https://github.com/70d8/MySound/releases/download/";
+
+#[derive(serde::Serialize, Debug, PartialEq)]
+struct UpdateInfo {
+    version: String,
+    url: String,
+    page: String,
+}
+
+fn ver_parts(v: &str) -> Vec<u64> {
+    v.trim_start_matches('v').split('.').map(|p| p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0)).collect()
+}
+
+/// เลือกรีลีสของแอป PC ที่ใหม่กว่าเวอร์ชันปัจจุบัน (แท็ก v<เลข>, ไม่ใช่ร่าง/pre-release, มีไฟล์ *_x64-setup.exe) ข้ามรีลีสของ Android (android-v*)
+fn pick_update(releases: &serde_json::Value, current: &str) -> Option<UpdateInfo> {
+    let cur = ver_parts(current);
+    releases
+        .as_array()?
+        .iter()
+        .filter(|r| r["draft"] != true && r["prerelease"] != true)
+        .filter_map(|r| {
+            let tag = r["tag_name"].as_str()?;
+            if !tag.strip_prefix('v')?.starts_with(|c: char| c.is_ascii_digit()) { return None; }
+            let url = r["assets"].as_array()?.iter().find_map(|a| a["name"].as_str().filter(|n| n.ends_with("_x64-setup.exe")).and(a["browser_download_url"].as_str()))?;
+            Some(UpdateInfo { version: tag.trim_start_matches('v').to_string(), url: url.to_string(), page: r["html_url"].as_str().unwrap_or("").to_string() })
+        })
+        .filter(|u| ver_parts(&u.version) > cur)
+        .max_by_key(|u| ver_parts(&u.version))
+}
+
+#[tauri::command]
+async fn check_update() -> Result<Option<UpdateInfo>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut r = ureq::get(RELEASES_API)
+            .header("User-Agent", "MySound-updater")
+            .header("Accept", "application/vnd.github+json")
+            .call()
+            .map_err(|e| format!("เช็กเวอร์ชันใหม่ไม่ได้: {e}"))?;
+        let bytes = r.body_mut().with_config().limit(5_000_000).read_to_vec().map_err(|e| e.to_string())?;
+        let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        Ok(pick_update(&v, env!("CARGO_PKG_VERSION")))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// โหลดตัวติดตั้งจาก GitHub Releases ของโปรเจกต์นี้เท่านั้น แล้วเปิดมัน และปิดแอปให้ตัวติดตั้งแทนที่ไฟล์ได้
+#[tauri::command]
+async fn install_update(app: AppHandle, url: String) -> Result<(), String> {
+    if !url.starts_with(RELEASE_DL_PREFIX) || !url.ends_with("_x64-setup.exe") {
+        return Err("ลิงก์อัปเดตไม่ถูกต้อง".into());
+    }
+    let path = tauri::async_runtime::spawn_blocking(move || -> Result<std::path::PathBuf, String> {
+        let path = std::env::temp_dir().join("MySound-update-setup.exe");
+        let mut r = ureq::get(&url).header("User-Agent", "MySound-updater").call().map_err(|e| format!("โหลดตัวติดตั้งไม่ได้: {e}"))?;
+        let mut f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+        std::io::copy(&mut r.body_mut().with_config().limit(500_000_000).reader(), &mut f).map_err(|e| format!("โหลดตัวติดตั้งไม่สำเร็จ: {e}"))?;
+        Ok(path)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Command::new(&path).spawn().map_err(|e| format!("เปิดตัวติดตั้งไม่ได้: {e}"))?;
+    app.exit(0);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn safe_names() {
         assert_eq!(super::safe_name("AC/DC: Back in Black?"), "AC_DC_ Back in Black_");
         assert_eq!(super::safe_name("  end.. "), "end");
+    }
+    #[test]
+    fn pick_update_rules() {
+        let j = serde_json::json!([
+            {"tag_name":"android-v1.0.0","draft":false,"prerelease":false,"html_url":"p0","assets":[{"name":"a.apk","browser_download_url":"u0"}]},
+            {"tag_name":"v0.1.9","draft":true,"prerelease":false,"html_url":"p9","assets":[{"name":"MySound_0.1.9_x64-setup.exe","browser_download_url":"u9"}]},
+            {"tag_name":"v0.1.3","draft":false,"prerelease":false,"html_url":"p3","assets":[{"name":"MySound_0.1.3_x64-setup.exe","browser_download_url":"u3"}]},
+            {"tag_name":"v0.1.10","draft":false,"prerelease":false,"html_url":"p10","assets":[{"name":"MySound_0.1.10_x64-setup.exe","browser_download_url":"u10"}]},
+            {"tag_name":"v0.1.11","draft":false,"prerelease":false,"html_url":"p11","assets":[]}
+        ]);
+        // เลขสองหลักต้องมากกว่า 3 / ไม่เอาร่าง / ไม่เอา android / ไม่เอารีลีสที่ไม่มี exe
+        assert_eq!(super::pick_update(&j, "0.1.2").map(|u| u.version), Some("0.1.10".into()));
+        assert_eq!(super::pick_update(&j, "0.1.10"), None);
+        assert_eq!(super::pick_update(&serde_json::json!({}), "0.1.0"), None);
     }
 }
 
@@ -601,7 +696,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Discord::default())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![read_library, write_library, download, genius_cover, import_cover, missing_files, delete_files, tool_version, ytdlp_update, process_audio, export_library, lyrics, discord_update, discord_clear, search_online, read_text_file])
+        .invoke_handler(tauri::generate_handler![read_library, write_library, download, genius_cover, import_cover, missing_files, delete_files, tool_version, ytdlp_update, process_audio, export_library, lyrics, discord_update, discord_clear, check_update, install_update, search_online, read_text_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

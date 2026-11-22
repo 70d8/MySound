@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+  import { measureLufs, normGain } from './loudness';
   import { listen, emit } from '@tauri-apps/api/event';
   import { open } from '@tauri-apps/plugin-dialog';
   import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -8,7 +9,7 @@
   import { i18n, tr, type Lang } from '$lib/i18n.svelte';
   import Icon from '$lib/Icon.svelte';
   import {
-    fmt, fmtDate, cover, art, hue, parseLrc, lrcIndex, linkKey, isPlaylistLink, isSupportedLink, versionAgeDays,
+    fmt, fmtDate, cover, art, hue, parseLrc, lrcIndex, splitArtistTitle, linkKey, isPlaylistLink, isSupportedLink, versionAgeDays,
     type Track, type Playlist, type LrcLine
   } from '$lib/data';
   import { THEMES, LAYOUTS, DEFAULT_LOOK, normalizeLook, lookVars, isLight, paletteFromPixels, type Look } from '$lib/look';
@@ -40,6 +41,8 @@
   let speed = $state(1);
   let discord = $state(true); // แสดงเพลงที่ฟังใน Discord
   let discordMsg = $state('');
+  let normalize = $state(true); // ปรับระดับเสียงให้แต่ละเพลงใกล้เคียงกัน
+  let ytCookies = $state(''); // คุกกี้ให้ yt-dlp: '' | firefox | edge | chrome | brave | file:พาธ
   let discordLy = $state(false); // แสดงบรรทัดเนื้อเพลงใต้ชื่อเพลงในสถานะ Discord
   let dLine = $state(''); // บรรทัดที่ส่งไป Discord ล่าสุด (จำกัดความถี่)
   let seeks = $state(0); // นับครั้งที่กรอเพลง เพื่อให้ Discord ปรับแถบเวลา
@@ -94,6 +97,8 @@
         repeat = !!p.repeat;
         discord = p.discord ?? true;
         discordLy = !!p.discordLy;
+        normalize = p.normalize ?? true;
+        ytCookies = typeof p.ytCookies === 'string' ? p.ytCookies : '';
         speed = p.speed ?? 1;
         if (p.lang === 'th' || p.lang === 'en') i18n.lang = p.lang;
         look = normalizeLook(p.look);
@@ -137,7 +142,7 @@
     const json = JSON.stringify({
       tracks: $state.snapshot(library),
       playlists: $state.snapshot(playlists),
-      prefs: { volume, shuffle, repeat, discord, discordLy, speed, lang: i18n.lang, look: $state.snapshot(look), resumeId: current?.id ?? null, resumePos }
+      prefs: { volume, shuffle, repeat, discord, discordLy, ytCookies, normalize, speed, lang: i18n.lang, look: $state.snapshot(look), resumeId: current?.id ?? null, resumePos }
     });
     const timer = setTimeout(() => invoke('write_library', { json }).catch((e) => (notice = tr('บันทึกไม่ได้: {0}', tr(String(e))))), 400);
     return () => clearTimeout(timer);
@@ -255,9 +260,87 @@
   }
 
   let fading = false;
+  // ระดับเสียงจริง = ที่ผู้ใช้ตั้ง × ตัวคูณปรับเสียงรายเพลง (ลดเพลงที่ดังเกิน)
+  const gain = $derived(normalize ? normGain(current?.lufs) : 1);
+  const vol = () => (volume / 100) * gain;
   $effect(() => {
-    if (audio && !fading) audio.volume = volume / 100;
+    if (audio && !fading) audio.volume = vol();
   });
+  // วัดความดังของเพลงที่เพิ่งเล่นครั้งแรก (ครั้งเดียวต่อเพลง เก็บผลไว้ในคลัง)
+  const lufsTried = new Set<number>();
+  async function analyze(t: Track): Promise<void> {
+    if (t.lufs != null || lufsTried.has(t.id)) return;
+    lufsTried.add(t.id);
+    try {
+      const bytes = await (await fetch(convertFileSrc(t.path))).arrayBuffer();
+      const v = await measureLufs(bytes);
+      if (v != null) t.lufs = Math.round(v * 10) / 10;
+    } catch {
+      /* ถอดรหัสไม่ได้: ข้าม เล่นด้วยระดับเสียงปกติ */
+    }
+  }
+  $effect(() => {
+    const t = current;
+    if (normalize && t && t.lufs == null) analyze(t);
+  });
+  // ---------- อัปเดตแอป (เช็กรีลีสล่าสุดบน GitHub) ----------
+  type Upd = { version: string; url: string; page: string };
+  let upd = $state<Upd | null>(null);
+  let updBusy = $state(false);
+  let updMsg = $state('');
+  let updDismissed = $state(false);
+  async function checkUpdate(manual: boolean) {
+    if (updBusy) return;
+    updBusy = true;
+    if (manual) updMsg = tr('กำลังตรวจ…');
+    try {
+      const u = await invoke<Upd | null>('check_update');
+      upd = u;
+      if (manual) updMsg = u ? tr('มีเวอร์ชันใหม่ {0}', u.version) : tr('เป็นเวอร์ชันล่าสุดแล้ว');
+    } catch (e) {
+      if (manual) updMsg = tr(String(e));
+    }
+    updBusy = false;
+  }
+  async function installUpdate() {
+    if (!upd || updBusy) return;
+    updBusy = true;
+    updMsg = tr('กำลังโหลดตัวติดตั้ง… แอปจะปิดแล้วเปิดตัวติดตั้งให้เอง');
+    try {
+      await invoke('install_update', { url: upd.url });
+    } catch (e) {
+      updMsg = tr(String(e));
+      notice = updMsg;
+      updBusy = false;
+    }
+  }
+  let updChecked = false;
+  $effect(() => {
+    if (!loaded || updChecked) return;
+    updChecked = true;
+    const h = setTimeout(() => checkUpdate(false), 4000); // เช็กเงียบๆ หลังเปิดแอป ถ้าเน็ตไม่มีก็ข้ามไป
+    return () => clearTimeout(h);
+  });
+  let tidyMsg = $state('');
+  function tidyTitles() {
+    let n = 0;
+    for (const t of library) {
+      const sp = splitArtistTitle(t.title);
+      if (sp) { t.title = sp.title; t.artist = sp.artist; n++; }
+    }
+    tidyMsg = n ? tr('แก้แล้ว {0} เพลง', n) : tr('ไม่มีเพลงที่ต้องแก้');
+  }
+  let analyzing = $state<{ done: number; total: number } | null>(null);
+  async function analyzeAll() {
+    const todo = library.filter((t) => t.lufs == null && !missing.includes(t.id));
+    analyzing = { done: 0, total: todo.length };
+    for (const t of todo) {
+      lufsTried.delete(t.id);
+      await analyze(t);
+      analyzing = { done: analyzing.done + 1, total: todo.length };
+    }
+    analyzing = null;
+  }
 
   // Space = เล่น/หยุด ยกเว้นตอนพิมพ์ข้อความหรืออยู่ในหน้าต่างย่อย; กันปุ่มที่โฟกัสอยู่ถูกกดซ้ำ
   const typing = (e: KeyboardEvent) => {
@@ -454,18 +537,18 @@
       sleepLeft = Math.max(0, Math.ceil((sleepEnd - Date.now()) / 1000));
       if (!audio) return;
       fading = sleepLeft <= 10;
-      if (fading) audio.volume = (volume / 100) * (sleepLeft / 10); // ค่อยๆ เบาใน 10 วินาทีสุดท้าย
+      if (fading) audio.volume = vol() * (sleepLeft / 10); // ค่อยๆ เบาใน 10 วินาทีสุดท้าย
       if (sleepLeft <= 0) {
         audio.pause();
         fading = false;
-        audio.volume = volume / 100;
+        audio.volume = vol();
         sleepEnd = sleepMin = 0;
       }
     }, 500);
     return () => {
       clearInterval(timer);
       fading = false;
-      if (audio) audio.volume = volume / 100;
+      if (audio) audio.volume = vol();
     };
   });
 
@@ -776,7 +859,8 @@
     if (library.some((t) => t.path === r.path)) return; // ไฟล์เดิมอยู่แล้ว (เช่น เพลงในเพลย์ลิสต์ที่เคยโหลด)
     const today = new Date().toISOString().slice(0, 10);
     const id = Date.now() + seq++;
-    library.unshift({ id, src: d?.src ?? 'youtube', added: today, last: today, plays: 0, title: r.title, artist: r.artist, album: r.album, dur: r.dur, path: r.path, cover: r.cover, coverUrl: r.thumb, url: r.url });
+    const sp = splitArtistTitle(r.title); // "ศิลปิน - ชื่อเพลง" → แยกใส่ช่องศิลปิน
+    library.unshift({ id, src: d?.src ?? 'youtube', added: today, last: today, plays: 0, title: sp?.title ?? r.title, artist: sp?.artist ?? r.artist, album: r.album, dur: r.dur, path: r.path, cover: r.cover, coverUrl: r.thumb, url: r.url });
     if (d) {
       d.count++;
       if (!d.playlist) d.title = r.title;
@@ -798,7 +882,7 @@
     d.msg = undefined;
     d.pct = 0;
     try {
-      await invoke('download', { id: d.id, url: d.url, playlist: d.playlist });
+      await invoke('download', { id: d.id, url: d.url, playlist: d.playlist, cookies: ytCookies });
       d.state = 'done';
       d.pct = 100;
     } catch (e) {
@@ -1126,6 +1210,42 @@
         <div><b>ffmpeg</b><small class="dim">{ffVer === undefined ? tr('กำลังตรวจ…') : ffVer === null ? tr('ไม่พบ (ไม่บังคับ ใช้กับการปรับเสียงและฝังแท็กตอนส่งออก) — winget install Gyan.FFmpeg') : tr('เวอร์ชัน {0}', ffVer)}</small></div>
         <button class="ghost" onclick={refreshTools}>{tr('ตรวจใหม่')}</button>
       </div>
+      <div class="tool">
+        <div><b>{tr('อัปเดตแอป')}</b><small class="dim">{tr('เช็กเวอร์ชันใหม่จาก GitHub ตอนเปิดแอปอยู่แล้ว กดตรงนี้เพื่อเช็กเอง')}</small></div>
+        {#if upd}
+          <button class="ghost" disabled={updBusy} onclick={installUpdate}>{tr('อัปเดตเป็น {0}', upd.version)}</button>
+        {:else}
+          <button class="ghost" disabled={updBusy} onclick={() => checkUpdate(true)}>{tr('ตรวจหาเวอร์ชันใหม่')}</button>
+        {/if}
+      </div>
+      <p class="dim" role="status" aria-live="polite">{updMsg}</p>
+      <div class="tool">
+        <div><b>{tr('แยกชื่อศิลปินออกจากชื่อเพลง')}</b><small class="dim">{tr('ชื่อแบบ “ศิลปิน - ชื่อเพลง” จะถูกแยกไปใส่ช่องศิลปิน และเหลือแค่ชื่อเพลงในช่องชื่อ (เพลงที่โหลดใหม่ทำให้อัตโนมัติอยู่แล้ว)')}</small></div>
+        <button class="ghost" disabled={!library.length} onclick={tidyTitles}>{tr('แก้ทั้งคลัง')}</button>
+      </div>
+      <p class="dim" role="status" aria-live="polite">{tidyMsg}</p>
+      <div class="tool">
+        <div><b>{tr('ปรับระดับเสียงแต่ละเพลงให้เท่ากัน')}</b><small class="dim">{tr('วัดความดังของแต่ละเพลงตอนเล่นครั้งแรก แล้วลดเพลงที่ดังเกินให้ใกล้เคียงกัน (เพิ่มเสียงเพลงที่เบาไม่ได้ ถ้าเบาไปให้เร่งปุ่มเสียงเอา)')}</small></div>
+        <label class="switch"><input type="checkbox" name="normalize" bind:checked={normalize} /><span>{normalize ? tr('เปิด') : tr('ปิด')}</span></label>
+        <button class="ghost" disabled={!normalize || !!analyzing || !library.some((t) => t.lufs == null)} onclick={analyzeAll}>{analyzing ? `${analyzing.done}/${analyzing.total}` : tr('วิเคราะห์ทั้งคลัง')}</button>
+      </div>
+      <div class="tool">
+        <div><b>{tr('คุกกี้สำหรับ YouTube')}</b><small class="dim">{tr('ถ้าดาวน์โหลดแล้วขึ้น “Sign in to confirm you’re not a bot” ให้เลือกเบราว์เซอร์ที่ล็อกอิน YouTube ไว้ Firefox เสถียรที่สุด ส่วน Chrome/Edge ต้องปิดเบราว์เซอร์ก่อนดาวน์โหลด และบางเวอร์ชันอ่านไม่ได้ ให้ใช้ไฟล์ cookies.txt แทน')}</small></div>
+        <select name="ytcookies" aria-label={tr('คุกกี้สำหรับ YouTube')} value={ytCookies.startsWith('file:') ? 'file' : ytCookies} onchange={(e) => (ytCookies = e.currentTarget.value === 'file' ? 'file:' : e.currentTarget.value)}>
+          <option value="">{tr('ไม่ใช้')}</option>
+          <option value="firefox">Firefox</option>
+          <option value="edge">Edge</option>
+          <option value="chrome">Chrome</option>
+          <option value="brave">Brave</option>
+          <option value="file">{tr('ไฟล์ cookies.txt')}</option>
+        </select>
+      </div>
+      {#if ytCookies.startsWith('file:')}
+        <div class="tool">
+          <div><b>{tr('พาธไฟล์ cookies.txt')}</b></div>
+          <input type="text" name="ytcookiefile" autocomplete="off" spellcheck="false" placeholder={tr('เช่น C:\\Users\\คุณ\\cookies.txt…')} value={ytCookies.slice(5)} oninput={(e) => (ytCookies = 'file:' + e.currentTarget.value)} />
+        </div>
+      {/if}
       <h2>Discord</h2>
       <div class="tool">
         <div><b>{tr('แสดงเพลงที่ฟังอยู่ในสถานะ Discord')}</b><small class="dim">{tr('ไม่ต้องเพิ่มแอปใน Discord เอง แค่เปิด Discord แบบแอปบนคอมไว้ แล้วกด “เชื่อมต่อ / ทดสอบ” (และเปิด Activity Privacy ในการตั้งค่า Discord)')}</small></div>
@@ -1319,6 +1439,14 @@
     </div>
   </footer>
 </div>
+
+{#if upd && !updDismissed}
+  <div class="toast n" role="status">
+    <span>{tr('มีเวอร์ชันใหม่ {0}', upd.version)}</span>
+    <button class="ghost" disabled={updBusy} onclick={installUpdate}>{updBusy ? tr('กำลังโหลด…') : tr('อัปเดตเลย')}</button>
+    <button class="ghost" onclick={() => (updDismissed = true)}>{tr('ไว้ก่อน')}</button>
+  </div>
+{/if}
 
 {#if notice}
   <div class="toast n" role="status">

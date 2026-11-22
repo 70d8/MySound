@@ -14,6 +14,7 @@ export type Track = {
   fav?: boolean; // ถูกใจ
   rating?: number; // 0-5 ดาว
   lrc?: string; // เนื้อเพลงที่ผู้ใช้ใส่เอง (LRC หรือข้อความธรรมดา)
+  lufs?: number | null; // ความดังเฉลี่ย (LUFS) ไว้ปรับระดับเสียงให้เท่ากัน
   coverUrl?: string | null; // ลิงก์รูปปกบนเน็ต ไว้ส่งให้ Discord (ไฟล์ในเครื่อง Discord อ่านไม่ได้)
 };
 
@@ -80,4 +81,10 @@ export const isSupportedLink = (u: string) => /youtu\.?be|soundcloud\.com/.test(
 export function versionAgeDays(v: string, now = new Date()): number | null {
   const m = v.match(/^(\d{4})\.(\d{2})\.(\d{2})/);
   return m ? Math.floor((+now - Date.UTC(+m[1], +m[2] - 1, +m[3])) / 864e5) : null;
+}
+
+/** ชื่อแบบ "ศิลปิน - ชื่อเพลง": ตัดส่วนศิลปินออกจากชื่อเพลงไปใส่ช่องศิลปิน (ต้องมีเว้นวรรครอบขีด เพื่อไม่แตะคำอย่าง "Jay-Z"/"re-edit") */
+export function splitArtistTitle(title: string): { artist: string; title: string } | null {
+  const m = /^\s*(.{1,80}?)\s+[-–—]\s+(\S.*?)\s*$/.exec(title);
+  return m ? { artist: m[1].trim(), title: m[2].trim() } : null;
 }
