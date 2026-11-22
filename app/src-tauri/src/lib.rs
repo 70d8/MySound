@@ -940,6 +940,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             build_tray(app.handle())?;
+            if let Some(w) = app.get_webview_window("main") { let _ = w.set_icon(app_icon()?); }
             if std::env::args().any(|a| a == "--minimized") {
                 if let Some(w) = app.get_webview_window("main") { let _ = w.hide(); }
             }
@@ -964,6 +965,11 @@ fn launch_files() -> Vec<String> {
     std::env::args().skip(1).filter(|a| !a.starts_with("--")).collect()
 }
 
+/// ไอคอนแอปฝังด้วย include_bytes: ไฟล์ไอคอนเปลี่ยนเมื่อไร cargo คอมไพล์ใหม่ให้เอง (ไม่ค้างไอคอนเก่าใน dev)
+fn app_icon() -> tauri::Result<tauri::image::Image<'static>> {
+    tauri::image::Image::from_bytes(include_bytes!("../icons/128x128.png"))
+}
+
 /// ไอคอนถาดระบบ: คลิกซ้าย = เปิดหน้าต่าง, คลิกขวา = เมนูควบคุมเพลง
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -978,8 +984,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         &PredefinedMenuItem::separator(app)?,
         &item("quit", "Quit")?,
     ])?;
-    let mut b = TrayIconBuilder::with_id("main").tooltip("MySound").menu(&menu).show_menu_on_left_click(false);
-    if let Some(icon) = app.default_window_icon() { b = b.icon(icon.clone()); }
+    let b = TrayIconBuilder::with_id("main").tooltip("MySound").menu(&menu).show_menu_on_left_click(false).icon(app_icon()?);
     b.on_menu_event(|app, e| match e.id().as_ref() {
         "show" => show_main(app),
         "quit" => app.exit(0),

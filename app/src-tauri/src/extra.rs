@@ -275,7 +275,12 @@ mod tests {
 }
 
 // ---------- AI จับเวลาเนื้อเพลง: whisper.cpp (โหลดตัวโปรแกรม + โมเดล small ตอนใช้ครั้งแรก) ----------
-const WHISPER_ZIP: &str = "https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip";
+// รุ่นใหม่ล่าสุดบางรุ่นไม่มีไฟล์ Windows ให้โหลด: ล็อกรุ่นที่มีแน่ๆ ไว้ก่อน แล้วค่อยลองรุ่นอื่น
+const WHISPER_ZIPS: [&str; 3] = [
+    "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.2/whisper-bin-x64.zip",
+    "https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip",
+    "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.3/whisper-bin-x64.zip",
+];
 const WHISPER_MODEL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
 const MODEL_MIN_BYTES: u64 = 400_000_000; // ggml-small.bin ~466 MB: เล็กกว่านี้ = โหลดไม่ครบ
 
@@ -344,7 +349,12 @@ pub async fn whisper_setup(app: AppHandle) -> Result<(), String> {
         if whisper_exe(&app).is_none() {
             if !cfg!(windows) { return Err("ตอนนี้รองรับเฉพาะ Windows".into()); }
             let zip = d.join("whisper-bin-x64.zip");
-            fetch_to(&app, WHISPER_ZIP, &zip, "engine")?;
+            let mut last = String::new();
+            let ok = WHISPER_ZIPS.iter().any(|u| match fetch_to(&app, u, &zip, "engine") {
+                Ok(()) => true,
+                Err(e) => { last = e; false }
+            });
+            if !ok { return Err(format!("โหลดตัวโปรแกรม whisper ไม่ได้ ({last})")); }
             // Windows 10 ขึ้นไปมี tar.exe ที่แตกไฟล์ zip ได้
             let out = tool("tar").arg("-xf").arg(&zip).arg("-C").arg(&d).output().map_err(|e| format!("แตกไฟล์ไม่ได้: {e}"))?;
             let _ = std::fs::remove_file(&zip);
