@@ -20,6 +20,13 @@ export type Look = {
   bg: string; // พาธรูปพื้นหลัง (ไฟล์ในโฟลเดอร์เพลงของแอป) ว่าง = ไม่ใช้
   bgAlpha: number; // % ความทึบของแผงเมื่อมีรูปพื้นหลัง (ต่ำ = เห็นรูปมาก)
   bgBlur: number; // px เบลอรูปพื้นหลัง
+  motion: boolean; // แอนิเมชันของแอป
+  breathe: boolean; // ปกเพลงหายใจตอนเล่น
+  accentMode: 'solid' | 'cycle'; // สีเดียว หรือวนสีเอง
+  accentStops: string[]; // สีที่วนผ่าน (2–8 สี)
+  accentSpeed: number; // 1 (ช้า) – 10 (เร็ว)
+  accentSaved: string[]; // สีที่บันทึกไว้
+  accentSets: { name: string; stops: string[] }[]; // ชุดสีวนที่บันทึกไว้
 };
 
 export const THEMES: { name: string; accent: string; base: string; raised: string; outer: string }[] = [
@@ -50,10 +57,22 @@ export const DEFAULT_LOOK: Look = {
   hc: false,
   bg: '',
   bgAlpha: 60,
-  bgBlur: 0
+  bgBlur: 0,
+  motion: true,
+  breathe: true,
+  accentMode: 'solid',
+  accentStops: ['#5eead4', '#7aa2ff', '#ff7aa8'],
+  accentSpeed: 5,
+  accentSaved: [],
+  accentSets: []
 };
 
 const hex = (s: unknown, d: string) => (typeof s === 'string' && /^#[0-9a-f]{6}$/i.test(s) ? s : d);
+const hexList = (a: unknown, min: number, max: number): string[] | null => {
+  if (!Array.isArray(a)) return null;
+  const out = a.filter((x): x is string => typeof x === 'string' && /^#[0-9a-f]{6}$/i.test(x)).map((x) => x.toLowerCase()).slice(0, max);
+  return out.length >= min ? out : null;
+};
 const num = (n: unknown, lo: number, hi: number, d: number) => (typeof n === 'number' && isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d);
 
 /** รับค่าจากไฟล์ที่อาจเก่า/พัง แล้วคืนค่าที่ใช้ได้เสมอ */
@@ -80,7 +99,16 @@ export function normalizeLook(x: Partial<Look> | null | undefined): Look {
     hc: !!o.hc,
     bg: typeof o.bg === 'string' ? o.bg : '',
     bgAlpha: num(o.bgAlpha, 15, 100, d.bgAlpha),
-    bgBlur: num(o.bgBlur, 0, 24, d.bgBlur)
+    bgBlur: num(o.bgBlur, 0, 24, d.bgBlur),
+    motion: o.motion ?? d.motion,
+    breathe: o.breathe ?? d.breathe,
+    accentMode: o.accentMode === 'cycle' ? 'cycle' : 'solid',
+    accentStops: hexList(o.accentStops, 2, 8) ?? d.accentStops,
+    accentSpeed: Math.round(num(o.accentSpeed, 1, 10, d.accentSpeed)),
+    accentSaved: hexList(o.accentSaved, 0, 24) ?? [],
+    accentSets: Array.isArray(o.accentSets)
+      ? o.accentSets.flatMap((x) => { const st = hexList(x?.stops, 2, 8); return st ? [{ name: String(x.name ?? '').slice(0, 24), stops: st }] : []; }).slice(0, 12)
+      : []
   };
 }
 
@@ -119,7 +147,7 @@ const FONTS: Record<Look['fontFace'], string> = {
 export function lookVars(l: Look): Record<string, string> {
   const light = isLight(l);
   const text = l.hc ? (light ? '#000000' : '#ffffff') : light ? '#14171c' : '#f2f4f7';
-  const accent = ensureContrast(l.accent, l.base, l.hc ? 4.5 : 3);
+  const { '--accent': accent, '--on-accent': onAccent } = accentVars(l.accent, l);
   const alpha = l.hc ? Math.max(l.bgAlpha, 85) : l.bgAlpha;
   return {
     '--bg-base': l.base,
@@ -130,7 +158,7 @@ export function lookVars(l: Look): Record<string, string> {
     '--text': text,
     '--text-dim': l.hc ? (light ? '#2b3138' : '#d5dae1') : light ? '#5b6472' : '#9aa3af',
     '--accent': accent,
-    '--on-accent': lum(accent) > 0.35 ? '#04201c' : '#ffffff',
+    '--on-accent': onAccent,
     '--line': `color-mix(in srgb, ${text} ${l.hc ? 22 : 8}%, transparent)`,
     '--line2': `color-mix(in srgb, ${text} ${l.hc ? 32 : 13}%, transparent)`,
     '--line3': `color-mix(in srgb, ${text} ${l.hc ? 42 : 18}%, transparent)`,
@@ -189,3 +217,28 @@ export function paletteFromPixels(d: ArrayLike<number>): Pick<Look, 'accent' | '
     outer: hsl2hex(h, 0.25, 0.03)
   };
 }
+
+/** สีเน้น + สีตัวอักษรบนสีเน้น (ปรับคอนทราสต์กับพื้นแผงให้อ่านออก) */
+export function accentVars(c: string, l: Look): { '--accent': string; '--on-accent': string } {
+  const accent = ensureContrast(c, l.base, l.hc ? 4.5 : 3);
+  return { '--accent': accent, '--on-accent': lum(accent) > 0.35 ? '#04201c' : '#ffffff' };
+}
+
+// ---------- สีวน (accent cycle) ----------
+export const RAINBOW = ['#ff4d4d', '#ff9f43', '#ffd93d', '#4ade80', '#38bdf8', '#7c83ff', '#c26bff'];
+export const rgbOf = (h: string): [number, number, number] => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)) as [number, number, number];
+export const toHex = (r: number, g: number, b: number) => '#' + [r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+/** วินาทีต่อหนึ่งรอบ: ระดับ 1 (ช้า) = 40 วินาที … ระดับ 10 (เร็ว) = 3 วินาที */
+export const cycleSeconds = (speed: number) => 40 * 0.75 ** (Math.min(10, Math.max(1, speed)) - 1);
+/** สี ณ ตำแหน่ง t (0..1 เป็นวงกลม: สีสุดท้ายไล่กลับไปสีแรก) ผสมเชิงเส้นระหว่างสีที่ติดกัน */
+export function cycleColor(stops: string[], t: number): string {
+  const n = stops.length;
+  if (n === 0) return '#ffffff';
+  if (n === 1) return stops[0];
+  const f = ((t % 1) + 1) % 1 * n;
+  const i = Math.floor(f), k = f - i;
+  const a = rgbOf(stops[i % n]), b = rgbOf(stops[(i + 1) % n]);
+  return toHex(a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k);
+}
+/** แถบตัวอย่างไล่สีแบบวนครบรอบ (ต่อสีแรกท้ายสุดให้เห็นว่าวนกลับ) */
+export const cycleGradient = (stops: string[]) => `linear-gradient(90deg, ${[...stops, stops[0]].join(', ')})`;

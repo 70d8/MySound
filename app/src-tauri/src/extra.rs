@@ -210,16 +210,18 @@ pub fn remote_start(app: AppHandle, state: tauri::State<'_, Remote>, port: u16) 
         Ok(s) => s,
         Err(e) => { state.run.store(false, Ordering::SeqCst); return Err(format!("เปิดพอร์ต {port} ไม่ได้: {e}")); }
     };
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
-    let pin = format!("{:06}", (nanos ^ 0x5bd1_e995) % 1_000_000);
+    // RandomState ถูก seed แบบสุ่มจากระบบปฏิบัติการ (เดาจากเวลาไม่ได้เหมือนเดิม)
+    let pin = { use std::hash::{BuildHasher, Hasher}; format!("{:06}", std::collections::hash_map::RandomState::new().build_hasher().finish() % 1_000_000) };
     let (run, st, pin2) = (state.run.clone(), state.state.clone(), pin.clone());
     std::thread::spawn(move || {
+        let mut bad = 0u32; // PIN ผิดครบ 30 ครั้ง = ปฏิเสธทุกคำขอจนกว่าจะปิด/เปิดรีโมทใหม่ (กันเดา PIN ในวง Wi-Fi เดียวกัน)
         while run.load(Ordering::SeqCst) {
             let Ok(Some(req)) = srv.recv_timeout(std::time::Duration::from_millis(400)) else { continue };
             let u = req.url().to_string();
             let q = query(&u);
             let json = |s: String| tiny_http::Response::from_string(s).with_header(tiny_http::Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap());
-            if q.get("k") != Some(&pin2) {
+            if bad >= 30 || q.get("k") != Some(&pin2) {
+                bad = bad.saturating_add(1);
                 let _ = req.respond(tiny_http::Response::from_string("PIN ไม่ถูกต้อง / wrong PIN").with_status_code(403));
                 continue;
             }
@@ -529,7 +531,7 @@ pub fn parse_whisper_json(v: &serde_json::Value) -> Vec<WWord> {
 
 /// ให้ whisper ฟังเพลงแล้วคืนคำ/โทเค็นพร้อมเวลา (มิลลิวินาที)
 #[tauri::command]
-pub async fn whisper_run(app: AppHandle, state: tauri::State<'_, Whisper>, path: String, lang: String) -> Result<Vec<WWord>, String> {
+pub async fn whisper_run(app: AppHandle, state: tauri::State<'_, Whisper>, path: String, lang: String, prompt: Option<String>) -> Result<Vec<WWord>, String> {
     let cell = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
         if !engine_ready(&app) || !model_ok(&model_path(&app)?) { return Err("AI ยังโหลดไม่ครบ ลองกดจับเวลาอีกครั้งเพื่อโหลดต่อ".into()); }
@@ -544,13 +546,16 @@ pub async fn whisper_run(app: AppHandle, state: tauri::State<'_, Whisper>, path:
         ffmpeg(&[o("-i"), o(&path), o("-vn"), o("-ar"), o("16000"), o("-ac"), o("1"), o("-c:a"), o("pcm_s16le"), wav.as_os_str()])?;
         let threads = std::thread::available_parallelism().map(|n| n.get().saturating_sub(1).clamp(1, 8)).unwrap_or(4).to_string();
         // รอบแรก: greedy + เวลาระดับโทเค็น; ถ้าพัง ลองแบบเวลาระดับช่วง (บาง CPU/รุ่นล่มกับ -ml 1)
+        // เนื้อเพลงเป็น prompt เริ่มต้น: ช่วยให้ฟังคำ/ชื่อเฉพาะ/ภาษาไทยถูกขึ้น (จำกัดความยาวไม่ให้ล้นขีดโทเค็นของ whisper)
+        let prompt: String = prompt.unwrap_or_default().chars().filter(|c| !c.is_control() || *c == ' ').take(160).collect::<String>().trim().to_string();
         let attempts: [&[&str]; 2] = [&["-bs", "1", "-bo", "1", "-ml", "1"], &["-bs", "1", "-bo", "1", "-nf"]];
         let mut log = String::new();
         let mut result: Option<serde_json::Value> = None;
         let mut last_err = String::new();
         for (k, extra) in attempts.iter().enumerate() {
             let mut cmd = Command::new(&exe);
-            cmd.arg("-m").arg(&model).arg("-f").arg(&wav).args(["-l", &lang, "-t", &threads]).args(*extra).args(["-oj", "-pp", "-of"]).arg(&base)
+            cmd.arg("-m").arg(&model).arg("-f").arg(&wav).args(["-l", &lang, "-t", &threads]).args(*extra)
+                .args(if prompt.is_empty() { vec![] } else { vec!["--prompt", prompt.as_str()] }).args(["-oj", "-pp", "-of"]).arg(&base)
                 .current_dir(exe.parent().unwrap_or(&d)) // ให้หา DLL ข้างตัวโปรแกรมเจอ
                 .stdout(Stdio::null()).stderr(Stdio::piped());
             #[cfg(windows)]

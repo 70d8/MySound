@@ -4,7 +4,7 @@
   import { measureLufs, normGain, detectSilence, bpmAndWave } from './loudness';
   import { Fx, corsOk, EQ_FREQS, EQ_PRESETS } from './fx';
   import { parseQuery, matches, findDuplicates, dupKey, norm } from './search';
-  import { alignLines, fillGaps, type Word } from './align';
+  import { alignDetail, weakLines, fillGaps, type Word } from './align';
   import { listen, emit } from '@tauri-apps/api/event';
   import { open, save } from '@tauri-apps/plugin-dialog';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -15,11 +15,12 @@
   import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
   import { i18n, tr, type Lang } from '$lib/i18n.svelte';
   import Icon from '$lib/Icon.svelte';
+  import ShareCard from '$lib/ShareCard.svelte';
   import {
     fmt, fmtDate, cover, art, hue, parseLrc, lrcIndex, splitArtistTitle, cleanLyrics, linkKey, isPlaylistLink, isSupportedLink, versionAgeDays,
     type Track, type Playlist, type Smart, type LrcLine
   } from '$lib/data';
-  import { THEMES, LAYOUTS, DEFAULT_LOOK, normalizeLook, lookVars, isLight, paletteFromPixels, type Look } from '$lib/look';
+  import { THEMES, LAYOUTS, DEFAULT_LOOK, normalizeLook, lookVars, isLight, paletteFromPixels, accentVars, cycleColor, cycleSeconds, cycleGradient, rgbOf, toHex, RAINBOW, type Look } from '$lib/look';
 
   type Done = { title: string; artist: string; album: string; dur: number; playlist: string | null; url: string; thumb: string | null; path: string; cover: string | null };
 
@@ -511,7 +512,7 @@
   }
   let bulkDlg = $state<HTMLDialogElement>();
   let bed = $state({ artist: '', album: '', addTags: '', delTags: '' });
-  function openBulk() { bed = { artist: '', album: '', addTags: '', delTags: '' }; bulkDlg?.showModal(); }
+  function openBulk() { bed = { artist: '', album: '', addTags: '', delTags: '' }; openDlg(bulkDlg); }
   const splitTags = (s: string) => s.split(/[,，]/).map((x) => x.trim()).filter(Boolean);
   function saveBulk() {
     checkpoint();
@@ -900,7 +901,7 @@
     else if (k === 'm' || k === 'M') toggleMute();
     else if (k === 's' || k === 'S') { shuffle = !shuffle; say(shuffle ? tr('สุ่ม: เปิด') : tr('สุ่ม: ปิด')); }
     else if (k === 'r' || k === 'R') { repeat = !repeat; say(repeat ? tr('เล่นซ้ำ: เปิด') : tr('เล่นซ้ำ: ปิด')); }
-    else if ((k === 'l' || k === 'L') && current) toggleFav(current);
+    else if ((k === 'l' || k === 'L') && current) { toggleFav(current); heartPop(document.querySelector('.npbar .heart'), !!current.fav); }
     else if (/^[0-5]$/.test(k) && current) { current.rating = +k; say(+k ? '★'.repeat(+k) : tr('ล้างดาวแล้ว')); }
     else if (k === 'a' || k === 'A') toggleAB();
     else if (k === '[') nudgeLy(-0.1);
@@ -1411,38 +1412,15 @@
     } catch (e) { notice = tr(String(e)); }
     mp3Busy = false;
   }
-  // ---------- การ์ดแชร์ (รูป PNG) ----------
+  // ---------- การ์ดแชร์ (รูป PNG): หน้าต่างเลือกสไตล์/บรรทัด อยู่ใน ShareCard.svelte ----------
+  let shareOpen = $state<{ lines: string[]; first: number } | null>(null);
   async function shareCard() {
     const t = current;
     if (!t) return;
-    const W = 1080, H = 1350, c = document.createElement('canvas');
-    c.width = W; c.height = H;
-    const g = c.getContext('2d')!;
-    const img = await new Promise<HTMLImageElement | null>((res) => {
-      if (!t.cover) return res(null);
-      const i = new Image(); i.crossOrigin = 'anonymous'; i.onload = () => res(i); i.onerror = () => res(null); i.src = convertFileSrc(t.cover);
-    });
-    const acc = themeVars['--accent'] ?? '#5eead4';
-    g.fillStyle = '#111214'; g.fillRect(0, 0, W, H);
-    if (img) { g.filter = 'blur(60px) brightness(0.5)'; g.drawImage(img, -200, -200, W + 400, H + 400); g.filter = 'none'; }
-    else { const gr = g.createLinearGradient(0, 0, W, H); gr.addColorStop(0, acc); gr.addColorStop(1, '#111214'); g.fillStyle = gr; g.globalAlpha = 0.5; g.fillRect(0, 0, W, H); g.globalAlpha = 1; }
-    const S = 760, x0 = (W - S) / 2, y0 = 150;
-    g.save(); g.beginPath(); g.roundRect(x0, y0, S, S, 36); g.clip();
-    if (img) g.drawImage(img, x0, y0, S, S); else { g.fillStyle = acc; g.fillRect(x0, y0, S, S); }
-    g.restore();
-    g.textAlign = 'center'; g.fillStyle = '#fff';
-    const fit = (txt: string, size: number, weight: number, y: number, color = '#fff') => {
-      let s2 = size; g.font = `${weight} ${s2}px system-ui, 'Noto Sans Thai', sans-serif`;
-      while (g.measureText(txt).width > W - 140 && s2 > 24) { s2 -= 2; g.font = `${weight} ${s2}px system-ui, 'Noto Sans Thai', sans-serif`; }
-      g.fillStyle = color; g.fillText(txt, W / 2, y);
-    };
-    fit(t.title, 64, 800, 1010);
-    fit(tr(t.artist), 40, 500, 1070, 'rgba(255,255,255,.75)');
-    if (curLine && curLine !== '♪') fit(`“${curLine}”`, 40, 700, 1160, acc);
-    g.font = "600 28px system-ui, sans-serif"; g.fillStyle = 'rgba(255,255,255,.5)'; g.fillText('MySound', W / 2, H - 60);
-    const f = await save({ defaultPath: `${safeFile(t.title)}.png`, filters: [{ name: 'PNG', extensions: ['png'] }] });
-    if (!f) return;
-    try { await invoke('save_png', { path: f, b64: c.toDataURL('image/png') }); say(tr('บันทึกการ์ดแล้ว')); } catch (e) { notice = tr(String(e)); }
+    await loadLyrics(t);
+    const ls = ly.lines.length ? ly.lines.map((l) => l.text.trim()).filter(Boolean) : ly.plain.split('\n').map((x) => x.trim()).filter((x) => x && !/^\[.*\]$/.test(x));
+    const at = ly.lines.length && lyIdx >= 0 ? ls.indexOf(ly.lines[lyIdx].text.trim()) : -1;
+    shareOpen = { lines: ls, first: Math.max(0, at) };
   }
   const safeFile = (x: string) => x.replace(/[<>:"/\\|?*]+/g, '_').slice(0, 80) || 'MySound';
   // ---------- Last.fm ----------
@@ -1560,6 +1538,7 @@
           const before = p.ids.slice(0, drag.over).filter((id) => !moving.includes(id)).length;
           const rest = p.ids.filter((id) => !moving.includes(id));
           rest.splice(before, 0, ...moving);
+          flipNow = true; setTimeout(() => (flipNow = false), 50);
           p.ids = rest;
         }
       }
@@ -1726,15 +1705,126 @@
   }
 
   // ---------- หน้าตา: แปลงค่าที่เลือกเป็นตัวแปร CSS ----------
-  const themeVars = $derived(lookVars(coverAccent && accentOv ? { ...look, accent: accentOv } : look));
+  const cycling = $derived(look.accentMode === 'cycle' && look.accentStops.length >= 2);
+  // ตอนวนสี ค่าคงที่ใช้สีแรกของชุด (รีโมต/เนื้อเพลงลอย/การ์ดแชร์) ส่วนบนหน้าจอให้ลูปด้านล่างเปลี่ยนเอง
+  const themeVars = $derived(lookVars(cycling ? { ...look, accent: look.accentStops[0] } : coverAccent && accentOv ? { ...look, accent: accentOv } : look));
   $effect(() => void (document.documentElement.lang = i18n.lang));
   $effect(() => {
     const r = document.documentElement;
-    for (const [k, v] of Object.entries(themeVars)) r.style.setProperty(k, v);
+    const skip = cycling; // ให้ลูปวนสีเป็นคนตั้ง --accent เอง ไม่งั้นจะกระพริบกลับสีแรก
+    for (const [k, v] of Object.entries(themeVars)) if (!(skip && (k === '--accent' || k === '--on-accent'))) r.style.setProperty(k, v);
     r.style.fontSize = `${look.font}%`;
     r.style.colorScheme = isLight(look) ? 'light' : 'dark';
   });
-  const pickTheme = (t: (typeof THEMES)[number]) => (look = { ...look, accent: t.accent, base: t.base, raised: t.raised, outer: t.outer });
+  // ---------- แอนิเมชัน ----------
+  let reduced = $state(matchMedia('(prefers-reduced-motion: reduce)').matches);
+  $effect(() => {
+    const mq = matchMedia('(prefers-reduced-motion: reduce)');
+    const f = () => (reduced = mq.matches);
+    mq.addEventListener('change', f);
+    return () => mq.removeEventListener('change', f);
+  });
+  const moving = $derived(look.motion && !reduced);
+  $effect(() => {
+    const r = document.documentElement;
+    r.classList.toggle('nomo', !moving);
+    r.classList.toggle('acc-ease', moving && !cycling); // ตอนวนสีไม่ต้องไล่ซ้อน ไม่งั้นสีจะตามไม่ทัน
+  });
+  const EASE = 'cubic-bezier(0.23, 1, 0.32, 1)';
+  const easeOut = (t: number) => 1 - (1 - t) ** 4;
+  // ปก/ชื่อเพลงตอนเปลี่ยนเพลง: อันใหม่ชัดขึ้นจากเบลอ อันเก่าจางออก (ซ้อนกันเพราะเป็น absolute)
+  const coverIn = (_: Element) => ({ duration: moving ? 320 : 0, easing: easeOut, css: (t: number) => `opacity:${t};filter:blur(${(1 - t) * 6}px);transform:scale(${0.94 + t * 0.06})` });
+  const fadeOut = (_: Element) => ({ duration: moving ? 220 : 0, css: (t: number) => `opacity:${t}` });
+  const textIn = (_: Element) => ({ duration: moving ? 260 : 0, easing: easeOut, css: (t: number) => `opacity:${t};filter:blur(${(1 - t) * 3}px);transform:translateY(${(1 - t) * 6}px)` });
+  // toast เข้าและออกทางเดียวกัน (จากล่าง) เพื่อให้รู้ว่ามันไปไหน
+  const toastT = (_: Element, { inn = true } = {}) => ({ duration: moving ? (inn ? 300 : 180) : 0, easing: easeOut, css: (t: number) => `opacity:${t};transform:translate(-50%, ${(1 - t) * 18}px) scale(${0.96 + t * 0.04})` });
+  // แถวที่เพิ่ม/ลบ: ยุบ/ขยายความสูง แต่ถ้าเปลี่ยนทีละเยอะ (เช่น พิมพ์ค้นหา) หรือรายการยาวที่เลื่อนแบบเสมือน ให้ข้ามไปเลย
+  let rowBurst = 0;
+  const rowHeight = (node: Element, { n = 0 } = {}) => {
+    rowBurst++;
+    queueMicrotask(() => (rowBurst = 0));
+    return () => {
+      if (!moving || n >= VIRT_MIN || rowBurst > 6) return { duration: 0 };
+      const h = (node as HTMLElement).offsetHeight;
+      return { duration: 200, easing: easeOut, css: (t: number) => `height:${t * h}px;opacity:${t};overflow:hidden` };
+    };
+  };
+  // เปิดหน้ารายการ: 12 แถวแรกขึ้นแบบสเตเกอร์ (ครั้งเดียวตอนเปิดหน้า ไม่ใช่ตอนเลื่อน)
+  let stagger = $state(false);
+  $effect(() => {
+    void view;
+    stagger = true;
+    const h = setTimeout(() => (stagger = false), 700);
+    return () => clearTimeout(h);
+  });
+  // หลังวางเพลงที่ลากจัดลำดับ แถวไหลเข้าที่ (เฉพาะตอนวาง ไม่ใช่ตอนเรียงหรือค้นหา)
+  let flipNow = false;
+  const rowFlip = (node: Element, { from, to }: { from: DOMRect; to: DOMRect }) => {
+    const dy = from.top - to.top;
+    if (!flipNow || !moving || !dy) return { duration: 0 };
+    return { duration: 240, easing: easeOut, css: (t: number) => `transform:translateY(${(1 - t) * dy}px)` };
+  };
+  // หน้าต่าง (dialog) ขยายออกจากจุดที่กด ถ้าเปิดด้วยคีย์บอร์ดค่อยขยายจากกลาง
+  let lastPress = { x: 0, y: 0, t: 0 };
+  $effect(() => {
+    const f = (e: PointerEvent) => (lastPress = { x: e.clientX, y: e.clientY, t: performance.now() });
+    addEventListener('pointerdown', f, true);
+    return () => removeEventListener('pointerdown', f, true);
+  });
+  function openDlg(d: HTMLDialogElement | undefined | null) {
+    if (!d) return;
+    if (!d.open) d.showModal();
+    if (!moving) return;
+    const r = d.getBoundingClientRect(), fresh = performance.now() - lastPress.t < 1500;
+    d.style.transformOrigin = fresh ? `${lastPress.x - r.left}px ${lastPress.y - r.top}px` : 'center';
+    d.animate([{ opacity: 0, transform: 'scale(0.9)' }, { opacity: 1, transform: 'none' }], { duration: 240, easing: EASE });
+  }
+  // หัวใจเด้งตอนกดถูกใจ (ไม่เด้งตอนเลิกถูกใจ)
+  function heartPop(el: Element | null | undefined, on: boolean) {
+    const svg = el?.querySelector('svg');
+    if (!svg || !on || !moving) return;
+    svg.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.35)', offset: 0.35 }, { transform: 'scale(0.92)', offset: 0.7 }, { transform: 'scale(1)' }], { duration: 420, easing: 'ease-out' });
+  }
+  const favClick = (e: MouseEvent, t: Track) => { toggleFav(t); heartPop(e.currentTarget as Element, !!t.fav); };
+
+  // ---------- สีเน้นแบบวนสี ----------
+  let cyc = 0; // ตำแหน่งในรอบ (0..1) เก็บไว้นอก effect เปลี่ยนความเร็วแล้วสีไม่กระโดด
+  $effect(() => {
+    if (!cycling) return;
+    const l = $state.snapshot(look) as Look;
+    const stops = l.accentStops, sec = cycleSeconds(l.accentSpeed), r = document.documentElement;
+    const put = () => { const v = accentVars(cycleColor(stops, cyc), l); r.style.setProperty('--accent', v['--accent']); r.style.setProperty('--on-accent', v['--on-accent']); };
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) { cyc = 0; put(); return; }
+    let raf = 0, last = performance.now(), painted = 0;
+    const tick = (now: number) => {
+      cyc = (cyc + Math.min(now - last, 250) / 1000 / sec) % 1; // พับจอแล้วกลับมาไม่กระโดดไกล
+      last = now;
+      if (now - painted >= 50) { painted = now; put(); } // ~20 ครั้ง/วิ พอให้ลื่นและไม่กินเครื่อง
+      raf = requestAnimationFrame(tick);
+    };
+    put();
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  });
+  const setRgb = (i: number, v: number) => { const c = rgbOf(look.accent); c[i] = Math.max(0, Math.min(255, Math.round(v) || 0)); look.accent = toHex(...c); };
+  const setHex = (v: string) => {
+    let h = v.trim().toLowerCase().replace(/^#?/, '#');
+    if (/^#[0-9a-f]{3}$/.test(h)) h = '#' + [...h.slice(1)].map((x) => x + x).join('');
+    if (/^#[0-9a-f]{6}$/.test(h)) look.accent = h;
+  };
+  const saveAccent = () => (look.accentSaved = [look.accent, ...look.accentSaved.filter((x) => x !== look.accent)].slice(0, 24));
+  const setStopCount = (n: number) => {
+    const s = look.accentStops.slice(0, Math.max(2, Math.min(8, n)));
+    while (s.length < n && s.length < 8) s.push(RAINBOW[s.length % RAINBOW.length]);
+    look.accentStops = s;
+  };
+  const sameStops = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+  const saveSet = () => {
+    const st = [...look.accentStops];
+    if (look.accentSets.some((x) => sameStops(x.stops, st))) return say(tr('มีชุดสีนี้อยู่แล้ว'));
+    look.accentSets = [{ name: tr('ชุดที่ {0}', look.accentSets.length + 1), stops: st }, ...look.accentSets].slice(0, 12);
+  };
+  const pickTheme = (t: (typeof THEMES)[number]) => (look = { ...look, accentMode: 'solid', accent: t.accent, base: t.base, raised: t.raised, outer: t.outer });
   const pickLayout = (l: (typeof LAYOUTS)[number]) => (look = { ...look, ...l.v });
   // รูปพื้นหลัง: คัดลอกเข้าโฟลเดอร์ของแอป (asset protocol อ่านได้เฉพาะที่นั่น) แล้วลบรูปเก่า
   let bgUrl = $state('');
@@ -1914,6 +2004,23 @@
     const plain = c.p ? cleanLyrics(c.p) : '';
     return lines.length || plain ? { status: 'ready', lines, plain } : { status: 'none', lines: [], plain: '' };
   };
+  // กำลังดึงอยู่ (ตอนพรีโหลดเพลงถัดไป) ถ้าผู้ใช้เปลี่ยนมาเพลงนั้นพอดีจะรอผลเดียวกัน ไม่ยิงซ้ำ
+  const lyFlight = new Map<number, Promise<LyC>>();
+  function fetchLy(t: Track): Promise<LyC> {
+    let p = lyFlight.get(t.id);
+    if (!p) {
+      p = invoke<{ synced: string | null; plain: string | null }>('lyrics', { title: t.title, artist: t.artist, dur: t.dur })
+        .then((d) => {
+          const c = { s: d.synced, p: d.plain };
+          lyCache.set(t.id, lyFrom(c));
+          cacheLy(t.id, c);
+          return c;
+        })
+        .finally(() => lyFlight.delete(t.id));
+      lyFlight.set(t.id, p);
+    }
+    return p;
+  }
   async function loadLyrics(t: Track, force = false) {
     if (t.lrc) {
       const src = cleanLyrics(t.lrc);
@@ -1931,10 +2038,7 @@
     ly = { status: 'loading', lines: [], plain: '' };
     let r: Ly;
     try {
-      const d = await invoke<{ synced: string | null; plain: string | null }>('lyrics', { title: t.title, artist: t.artist, dur: t.dur });
-      r = lyFrom({ s: d.synced, p: d.plain });
-      lyCache.set(t.id, r);
-      cacheLy(t.id, { s: d.synced, p: d.plain });
+      r = lyFrom(await fetchLy(t));
     } catch (e) {
       r = { status: 'error', lines: [], plain: '', msg: tr(String(e)) };
     }
@@ -1943,6 +2047,13 @@
   $effect(() => {
     if ((panel === 'lyrics' || barLy || karaoke || lyFloatOpen || (discord && discordLy)) && current) loadLyrics(current);
   });
+  // พรีโหลดเนื้อเพลงของ 2 เพลงถัดไปในคิวขณะเพลงนี้เล่น พอถึงเพลงนั้นก็ขึ้นทันที
+  $effect(() => {
+    if (!(panel === 'lyrics' || barLy || karaoke || lyFloatOpen || (discord && discordLy)) || !current || !playing) return;
+    const ahead = queue.slice(0, 2).filter((t) => !t.lrc && !lyCache.has(t.id) && !lyDisk[t.id] && !lyFlight.has(t.id));
+    const timer = setTimeout(() => ahead.forEach((t) => void fetchLy(t).catch(() => {})), 1500); // ให้เพลงปัจจุบันได้ก่อน
+    return () => clearTimeout(timer);
+  });
   const lyOff = $derived(current?.lyOff ?? 0); // วินาที: บวก = เนื้อเพลงขึ้นช้าลง
   const lyIdx = $derived(ly.lines.length ? lrcIndex(ly.lines, pos - lyOff) : -1);
   function nudgeLy(d: number) {
@@ -1950,21 +2061,30 @@
     current.lyOff = Math.round(((current.lyOff ?? 0) + d) * 10) / 10 || 0;
   }
   const barLine = $derived(barLy && current && ly.status === 'ready' && lyIdx >= 0 ? ly.lines[lyIdx].text || '♪' : '');
-  // ---------- เนื้อเพลงใน Discord: เลือกบรรทัดล่วงหน้า 1.5 วินาที (กันหน่วง) และส่งไม่ถี่กว่า 5 วินาทีต่อครั้ง ----------
-  const dIdx = $derived(discord && discordLy && playing && ly.status === 'ready' && ly.lines.length ? lrcIndex(ly.lines, pos + 1.5 - lyOff) : -1);
-  let dLast = 0;
+  // ---------- เนื้อเพลงใน Discord: เลือกบรรทัดล่วงหน้า 2 วินาที (กันหน่วง) ส่งแบบโควตา ไม่เกิน 4 ครั้งต่อ 20 วินาที ----------
+  const dIdx = $derived(discord && discordLy && playing && ly.status === 'ready' && ly.lines.length ? lrcIndex(ly.lines, pos + 2 - lyOff) : -1); // เลือกล่วงหน้า 2 วินาที ชดเชยการส่ง+การวาดของ Discord
+  // ตัวจำกัดความถี่แบบโควตา: Discord รับอัปเดตสถานะประมาณ 5 ครั้ง/20 วินาที เราใช้ไม่เกิน 4 ครั้งต่อ 20 วินาที
+  // (เหลือไว้ให้ pause/เปลี่ยนเพลง) และห่างกันอย่างน้อย 1.2 วินาที บรรทัดที่ห่างกันนานจึงส่งทันทีไม่ต้องรอ 5 วินาทีทุกครั้ง
+  const D_WINDOW = 20000, D_MAX = 4, D_GAP = 1200;
+  let dSends: number[] = [];
+  function dWait(now: number) {
+    dSends = dSends.filter((t) => now - t < D_WINDOW);
+    const byWindow = dSends.length >= D_MAX ? dSends[dSends.length - D_MAX] + D_WINDOW - now : 0;
+    const byGap = dSends.length ? dSends[dSends.length - 1] + D_GAP - now : 0;
+    return Math.max(0, byWindow, byGap);
+  }
   $effect(() => {
     void current?.id; // เปลี่ยนเพลง: ล้างบรรทัดเก่าทันที
     dLine = '';
-    dLast = 0;
+    dSends = [];
   });
   $effect(() => {
     const want = dIdx >= 0 ? ly.lines[dIdx].text.trim() : '';
     if (want === untrack(() => dLine)) return;
     const timer = setTimeout(() => {
       dLine = want;
-      dLast = Date.now();
-    }, Math.max(0, 5000 - (Date.now() - dLast)));
+      dSends.push(Date.now());
+    }, dWait(Date.now()));
     return () => clearTimeout(timer);
   });
 
@@ -2145,13 +2265,17 @@
         await aiPrepare();
       }
       ai = { stage: 'run', pct: 0 };
-      const words = await invoke<Word[]>('whisper_run', { path: t.path, lang: /[\u0e00-\u0e7f]/.test(lines.join('')) ? 'th' : 'auto' });
-      const times = alignLines(lines, words);
+      // ส่งเนื้อเพลงให้ whisper เป็น prompt (ท่อนแรกๆ) ช่วยให้ฟังคำถูกขึ้น
+      const words = await invoke<Word[]>('whisper_run', { path: t.path, lang: /[\u0e00-\u0e7f]/.test(lines.join('')) ? 'th' : 'auto', prompt: lines.join(' ') });
+      const { times, conf } = alignDetail(lines, words);
       const found = times.filter((x) => x !== null).length;
       if (!found) throw new Error(tr('AI ไม่ได้ยินเสียงร้องที่ตรงกับเนื้อเพลงเลย ลองตั้งเวลาเองแทน'));
       const full = fillGaps(times, t.dur);
       lyText = lines.map((l, i) => `[${lrcTime(Math.max(0, full[i] - 0.1))}]${l}`).join('\n');
-      lyMsg = tr('AI จับเวลาได้ {0} จาก {1} บรรทัด (บรรทัดที่เหลือประมาณให้) ตรวจแล้วกดบันทึก', found, lines.length);
+      const weak = weakLines(times, conf, full);
+      lyMsg = weak.length
+        ? tr('AI จับเวลาได้ {0} จาก {1} บรรทัด · ควรตรวจบรรทัดที่ {2} (ไม่แน่ใจ) แล้วกดบันทึก', found, lines.length, weak.slice(0, 12).map((i) => i + 1).join(', ') + (weak.length > 12 ? '…' : ''))
+        : tr('AI จับเวลาได้ครบทุกบรรทัด ตรวจแล้วกดบันทึก');
     } catch (e) {
       lyMsg = tr(String(e instanceof Error ? e.message : e));
     } finally {
@@ -2202,7 +2326,7 @@
     lyText = current.lrc ?? (ly.status === 'ready' ? (ly.lines.length ? ly.lines.map((l) => l.text).join('\n') : ly.plain) : '');
     sync = null;
     lyMsg = '';
-    lyDlg?.showModal();
+    openDlg(lyDlg);
   }
   async function pickLrc() {
     const f = await open({ filters: [{ name: tr('เนื้อเพลง'), extensions: ['lrc', 'txt'] }] });
@@ -2266,7 +2390,7 @@
   let confirmS = $state<{ msg: string; label: string; ok: () => void }>({ msg: '', label: '', ok: () => {} });
   function ask(msg: string, label: string, ok: () => void) {
     confirmS = { msg, label, ok };
-    confirmDlg?.showModal();
+    openDlg(confirmDlg);
   }
   async function removeTracks(ts: Track[]) {
     const ids = new Set(ts.map((t) => t.id));
@@ -2345,7 +2469,7 @@
     clipA = 0; clipB = Math.round(t.dur); cutMsg = '';
     edit = { id: t.id, title: t.title, artist: t.artist, album: t.album, src: '', tags: (t.tags ?? []).join(', '), note: t.note ?? '' };
     editMsg = '';
-    dlg?.showModal();
+    openDlg(dlg);
   }
   async function run(job: () => Promise<string | void>) {
     busy = true;
@@ -2433,7 +2557,7 @@
   });
   function openPalette() {
     pal = { q: '', i: 0 };
-    palDlg?.showModal();
+    openDlg(palDlg);
   }
   function palKey(e: KeyboardEvent) {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -2469,15 +2593,19 @@
   function onTrackDone(job: number, r: Done) {
     const d = downloads.find((x) => x.id === job);
     if (d) d.count++; // นับทุกเพลงที่ yt-dlp รายงาน แม้อยู่ในคลังอยู่แล้ว
-    if (library.some((t) => t.path === r.path)) return; // ไฟล์เดิมอยู่แล้ว (เช่น เพลงในเพลย์ลิสต์ที่เคยโหลด)
-    const today = new Date().toISOString().slice(0, 10);
-    const id = Date.now() + seq++;
-    const sp = splitArtistTitle(r.title); // "ศิลปิน - ชื่อเพลง" → แยกใส่ช่องศิลปิน
-    library.unshift({ id, src: d?.src ?? 'youtube', added: today, last: today, plays: 0, title: sp?.title ?? r.title, artist: sp?.artist ?? r.artist, album: r.album, dur: r.dur, path: r.path, cover: r.cover, coverUrl: r.thumb, url: r.url });
-    if (d && !d.playlist) d.title = r.title;
-    if (r.playlist) addToPlaylist(playlists.find((p) => p.name === r.playlist)?.id ?? newPlaylist(r.playlist), id);
+    // เพลงที่มีไฟล์อยู่ในคลังแล้ว (เคยโหลดมาก่อน) ไม่สร้างซ้ำ แต่ยังต้องใส่เข้าเพลย์ลิสต์นี้ด้วย
+    let id = library.find((t) => t.path === r.path)?.id;
+    if (id === undefined) {
+      const today = new Date().toISOString().slice(0, 10);
+      id = Date.now() + seq++;
+      const sp = splitArtistTitle(r.title); // "ศิลปิน - ชื่อเพลง" → แยกใส่ช่องศิลปิน
+      library.unshift({ id, src: d?.src ?? 'youtube', added: today, last: today, plays: 0, title: sp?.title ?? r.title, artist: sp?.artist ?? r.artist, album: r.album, dur: r.dur, path: r.path, cover: r.cover, coverUrl: r.thumb, url: r.url });
+      if (d && !d.playlist) d.title = r.title;
+    }
+    const put = (pid: number) => { const p = playlists.find((x) => x.id === pid); if (p && !p.ids.includes(id)) p.ids.push(id); }; // เงียบ ไม่เด้งแจ้งซ้ำตอนโหลดทั้งลิสต์
+    if (r.playlist) put(playlists.find((p) => p.name === r.playlist)?.id ?? newPlaylist(r.playlist));
     const w = r.url ? plWait.get(linkKey(r.url)) : undefined;
-    if (w !== undefined) { addToPlaylist(w, id); plWait.delete(linkKey(r.url)); }
+    if (w !== undefined) { put(w); plWait.delete(linkKey(r.url)); }
   }
 
   /** ตรวจลิงก์ + สร้างรายการในรายการดาวน์โหลด (ยังไม่เริ่มโหลด) ถ้าใช้ไม่ได้คืนข้อความบอกเหตุผล */
@@ -2698,7 +2826,15 @@
     {@const i = wa + j}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <div
+      in:rowHeight={{ n: list.length }}
+      out:rowHeight={{ n: list.length }}
+      animate:rowFlip
       data-idx={i}
+      class:stag={stagger && i < 12}
+      style:--d={i}
+      class:lifted={!!drag && drag.ids.includes(t.id)}
+      class:shiftdn={drag?.over != null && i >= drag.over}
+      class:shiftup={drag?.over != null && i < drag.over}
       class:dropbefore={drag?.over === i}
       class:dropafter={drag?.over === i + 1 && i === list.length - 1}
       onpointerdown={(e) => rowDown(e, t, list, plId)}
@@ -2723,7 +2859,7 @@
       {#if cols.plays}<span class="dim r">{t.plays}</span>{/if}
       {#if cols.rating}<span class="dim stars-s">{'★'.repeat(t.rating ?? 0)}</span>{/if}
       {#if cols.bpm}<span class="dim r">{t.bpm ?? '–'}</span>{/if}
-      <button class="heart" class:on={t.fav} aria-label={t.fav ? tr('เลิกถูกใจ {0}', t.title) : tr('ถูกใจ {0}', t.title)} aria-pressed={!!t.fav} onclick={(e) => (e.stopPropagation(), toggleFav(t))} ondblclick={(e) => e.stopPropagation()}><Icon n="heart" size={16} fill={!!t.fav} /></button>
+      <button class="heart" class:on={t.fav} aria-label={t.fav ? tr('เลิกถูกใจ {0}', t.title) : tr('ถูกใจ {0}', t.title)} aria-pressed={!!t.fav} onclick={(e) => (e.stopPropagation(), favClick(e, t))} ondblclick={(e) => e.stopPropagation()}><Icon n="heart" size={16} fill={!!t.fav} /></button>
       {#if cols.dur}<span class="dim r">{fmt(t.dur)}</span>{/if}
       <button class="more" aria-label={tr('ตัวเลือกเพิ่มเติมของ {0}', t.title)} aria-haspopup="menu" onclick={(e) => (e.stopPropagation(), menu(e, t, plId))} ondblclick={(e) => e.stopPropagation()}><Icon n="more" size={18} /></button>
     </div>
@@ -3062,6 +3198,15 @@
         {/each}
       </div>
       {#if toolTab === 'gen'}
+      <div class="tool">
+        <div><b>{tr('อัปเดตแอป')}</b><small class="dim">{tr('เช็กเวอร์ชันใหม่จาก GitHub ตอนเปิดแอปอยู่แล้ว กดตรงนี้เพื่อเช็กเอง')}</small></div>
+        {#if upd}
+          <button class="ghost" disabled={updBusy} onclick={() => installUpdate()}>{tr('อัปเดตเป็น {0}', upd.version)}</button>
+        {:else}
+          <button class="ghost" disabled={updBusy} onclick={() => checkUpdate(true)}>{tr('ตรวจหาเวอร์ชันใหม่')}</button>
+        {/if}
+      </div>
+      <p class="dim" role="status" aria-live="polite">{updMsg}</p>
       <h2>{tr('Windows')}</h2>
       <div class="tool">
         <div><b>{tr('ปิดหน้าต่างแล้วย่อไปถาดระบบ')}</b><small class="dim">{tr('กดปิดแล้วเพลงยังเล่นต่อ คลิกไอคอนที่มุมขวาล่างเพื่อเปิดกลับ คลิกขวาที่ไอคอนเพื่อควบคุมเพลงหรือออกจากแอป')}</small></div>
@@ -3236,10 +3381,24 @@
           {/each}
         </div>
       {/if}
+      <div class="tool balbox">
+        <div class="balhead">
+          <div><b id="bal-h">{tr('บาลานซ์ซ้าย–ขวา')}</b><small class="dim">{tr('เลื่อนไปทางที่อยากให้เสียงดังกว่า (ลำโพงหรือหูฟังข้างนั้น) กลางคือสมดุลปกติ')}</small></div>
+          <output class="balval" class:mid={balance === 0} aria-live="polite">{balance === 0 ? tr('กลาง') : balance < 0 ? tr('ซ้าย {0}%', Math.round(-balance * 100)) : tr('ขวา {0}%', Math.round(balance * 100))}</output>
+          <button type="button" class="ghost" disabled={balance === 0} onclick={() => (balance = 0)}>{tr('รีเซ็ต')}</button>
+        </div>
+        <div class="balbar">
+          <span class="balend" aria-hidden="true"><b>L</b>{tr('ซ้าย')}</span>
+          <div class="balrange">
+            <i class="balmid" aria-hidden="true"></i>
+            <input type="range" name="balance" min="-1" max="1" step="0.1" bind:value={balance} style:--lo="{Math.min(50, (balance + 1) * 50)}%" style:--hi="{Math.max(50, (balance + 1) * 50)}%" aria-labelledby="bal-h" aria-valuetext={balance === 0 ? tr('กลาง') : balance < 0 ? tr('ซ้าย {0}%', Math.round(-balance * 100)) : tr('ขวา {0}%', Math.round(balance * 100))} ondblclick={() => (balance = 0)} />
+          </div>
+          <span class="balend" aria-hidden="true"><b>R</b>{tr('ขวา')}</span>
+        </div>
+      </div>
       <div class="tool">
-        <div><b>{tr('บาลานซ์ซ้าย–ขวา')}</b><small class="dim">{tr('เลื่อนเสียงไปทางซ้ายหรือขวา')}</small></div>
-        <input type="range" name="balance" min="-1" max="1" step="0.1" bind:value={balance} aria-label={tr('บาลานซ์ซ้าย–ขวา')} />
-        <label class="switch"><input type="checkbox" name="mono" bind:checked={mono} /><span>{tr('โมโน')}</span></label>
+        <div><b>{tr('โมโน')}</b><small class="dim">{tr('ผสมเสียงซ้ายและขวาเป็นช่องเดียวกัน เหมาะกับคนที่ใช้หูฟังข้างเดียว หรือหูสองข้างได้ยินไม่เท่ากัน')}</small></div>
+        <label class="switch"><input type="checkbox" name="mono" bind:checked={mono} /><span>{mono ? tr('เปิด') : tr('ปิด')}</span></label>
       </div>
       <div class="tool">
         <div><b>{tr('ครอสเฟด')}</b><small class="dim">{tr('เพลงเก่าค่อย ๆ เบาลงขณะที่เพลงถัดไปค่อย ๆ ดังขึ้น')}</small></div>
@@ -3261,15 +3420,6 @@
         <div><b>{tr('สีเน้นตามปกเพลง')}</b><small class="dim">{tr('เปลี่ยนสีเน้นของแอปตามปกเพลงที่กำลังเล่น (ปิดแล้วกลับเป็นสีที่ตั้งไว้)')}</small></div>
         <label class="switch"><input type="checkbox" name="coveraccent" bind:checked={coverAccent} /><span>{coverAccent ? tr('เปิด') : tr('ปิด')}</span></label>
       </div>
-      <div class="tool">
-        <div><b>{tr('อัปเดตแอป')}</b><small class="dim">{tr('เช็กเวอร์ชันใหม่จาก GitHub ตอนเปิดแอปอยู่แล้ว กดตรงนี้เพื่อเช็กเอง')}</small></div>
-        {#if upd}
-          <button class="ghost" disabled={updBusy} onclick={() => installUpdate()}>{tr('อัปเดตเป็น {0}', upd.version)}</button>
-        {:else}
-          <button class="ghost" disabled={updBusy} onclick={() => checkUpdate(true)}>{tr('ตรวจหาเวอร์ชันใหม่')}</button>
-        {/if}
-      </div>
-      <p class="dim" role="status" aria-live="polite">{updMsg}</p>
       <div class="tool">
         <div><b>{tr('แยกชื่อศิลปินออกจากชื่อเพลง')}</b><small class="dim">{tr('ชื่อแบบ “ศิลปิน - ชื่อเพลง” จะถูกแยกไปใส่ช่องศิลปิน และเหลือแค่ชื่อเพลงในช่องชื่อ (เพลงที่โหลดใหม่ทำให้อัตโนมัติอยู่แล้ว)')}</small></div>
         <button class="ghost" disabled={!library.length} onclick={tidyTitles}>{tr('แก้ทั้งคลัง')}</button>
@@ -3339,9 +3489,71 @@
           </button>
         {/each}
       </div>
+      <h2>{tr('สีเน้น')}</h2>
+      <div class="seg wide" role="group" aria-label={tr('แบบสีเน้น')}>
+        <button type="button" class:on={look.accentMode === 'solid'} aria-pressed={look.accentMode === 'solid'} onclick={() => (look.accentMode = 'solid')}>{tr('สีเดียว')}</button>
+        <button type="button" class:on={look.accentMode === 'cycle'} aria-pressed={look.accentMode === 'cycle'} onclick={() => (look.accentMode = 'cycle')}>{tr('วนหลายสี')}</button>
+      </div>
+      {#if look.accentMode === 'solid'}
+        {@const c = rgbOf(look.accent)}
+        <div class="accbox">
+          <input type="color" class="bigsw" name="accent" aria-label={tr('สีเน้น')} bind:value={look.accent} />
+          <div class="rgbs">
+            {#each ['R', 'G', 'B'] as ch, i (ch)}
+              {@const lo = c.map((x, j) => (j === i ? 0 : x))}
+              {@const hi = c.map((x, j) => (j === i ? 255 : x))}
+              <label class="rgb">
+                <span>{ch}</span>
+                <input type="range" min="0" max="255" value={c[i]} aria-label={ch} style:--track={`linear-gradient(90deg, rgb(${lo}), rgb(${hi}))`} oninput={(e) => setRgb(i, +e.currentTarget.value)} />
+                <input type="number" min="0" max="255" value={c[i]} aria-label={ch} onchange={(e) => setRgb(i, +e.currentTarget.value)} />
+              </label>
+            {/each}
+            <label class="rgb"><span>HEX</span><input type="text" class="hex" maxlength="7" spellcheck="false" autocomplete="off" value={look.accent} onchange={(e) => setHex(e.currentTarget.value)} /></label>
+          </div>
+        </div>
+        <div class="saved">
+          <button class="ghost" onclick={saveAccent}>{tr('บันทึกสีนี้')}</button>
+          {#each look.accentSaved as h (h)}
+            <span class="chip">
+              <button type="button" class="dot" class:on={h === look.accent} style:background={h} aria-label={tr('ใช้สี {0}', h)} title={h} onclick={() => (look.accent = h)}></button>
+              <button type="button" class="x" aria-label={tr('ลบสี {0}', h)} onclick={() => (look.accentSaved = look.accentSaved.filter((x) => x !== h))}>×</button>
+            </span>
+          {/each}
+        </div>
+      {:else}
+        <div class="cyprev" style:background={cycleGradient(look.accentStops)} aria-hidden="true"></div>
+        <div class="accbox">
+          <div class="stepper" role="group" aria-label={tr('จำนวนสี')}>
+            <span class="dim">{tr('จำนวนสี')}</span>
+            <button type="button" class="ghost" aria-label={tr('ลดจำนวนสี')} disabled={look.accentStops.length <= 2} onclick={() => setStopCount(look.accentStops.length - 1)}>−</button>
+            <b>{look.accentStops.length}</b>
+            <button type="button" class="ghost" aria-label={tr('เพิ่มจำนวนสี')} disabled={look.accentStops.length >= 8} onclick={() => setStopCount(look.accentStops.length + 1)}>+</button>
+          </div>
+          <div class="stops">
+            {#each look.accentStops as _, i (i)}
+              <input type="color" aria-label={tr('สีที่ {0}', i + 1)} bind:value={look.accentStops[i]} />
+            {/each}
+          </div>
+          <button class="ghost rainbow" onclick={() => (look.accentStops = [...RAINBOW])}>🌈 {tr('สีรุ้ง')}</button>
+        </div>
+        <label class="speed">
+          <span>{tr('ความเร็ว')} <b>{look.accentSpeed}</b> <small class="dim">({tr('{0} วินาที/รอบ', cycleSeconds(look.accentSpeed).toFixed(cycleSeconds(look.accentSpeed) < 10 ? 1 : 0))})</small></span>
+          <input type="range" min="1" max="10" step="1" bind:value={look.accentSpeed} aria-label={tr('ความเร็วการวนสี')} />
+          <span class="ends dim"><small>{tr('ช้า')}</small><small>{tr('เร็ว')}</small></span>
+        </label>
+        <div class="saved">
+          <button class="ghost" onclick={saveSet}>{tr('บันทึกชุดสีนี้')}</button>
+          {#each look.accentSets as set, i (i)}
+            <span class="chip">
+              <button type="button" class="setbtn" class:on={sameStops(set.stops, look.accentStops)} style:background={cycleGradient(set.stops)} aria-label={tr('ใช้ชุดสี {0}', set.name)} title={set.name} onclick={() => (look.accentStops = [...set.stops])}></button>
+              <button type="button" class="x" aria-label={tr('ลบชุดสี {0}', set.name)} onclick={() => (look.accentSets = look.accentSets.filter((_, j) => j !== i))}>×</button>
+            </span>
+          {/each}
+        </div>
+        {#if coverAccent}<p class="dim">{tr('ตอนวนสี จะไม่ใช้สีตามปกเพลง')}</p>{/if}
+      {/if}
       <h2>{tr('ปรับสีเอง')}</h2>
       <div class="colors">
-        <label>{tr('สีเน้น')}<input type="color" name="accent" bind:value={look.accent} /></label>
         <label>{tr('พื้นแผง')}<input type="color" name="base" bind:value={look.base} /></label>
         <label>{tr('พื้นการ์ด')}<input type="color" name="raised" bind:value={look.raised} /></label>
         <label>{tr('พื้นหลังนอกแผง')}<input type="color" name="outer" bind:value={look.outer} /></label>
@@ -3394,6 +3606,9 @@
       <h2>{tr('อื่นๆ')}</h2>
       <label class="switch"><input type="checkbox" name="hc" bind:checked={look.hc} /><span>{tr('คอนทราสต์สูง (ตัวอักษรชัดขึ้น เส้นขอบเข้มขึ้น)')}</span></label>
       <label class="switch"><input type="checkbox" name="tint" bind:checked={look.tint} /><span>{tr('แผงขวาไล่สีตามปกเพลง')}</span></label>
+      <label class="switch"><input type="checkbox" name="motion" bind:checked={look.motion} /><span>{tr('แอนิเมชันของแอป (ปิดแล้วทุกอย่างเปลี่ยนทันที)')}</span></label>
+      {#if look.motion}<label class="switch"><input type="checkbox" name="breathe" bind:checked={look.breathe} /><span>{tr('ปกเพลงหายใจเบา ๆ ตอนเล่น')}</span></label>{/if}
+      {#if reduced}<p class="dim">{tr('Windows ตั้งให้ลดการเคลื่อนไหวไว้ แอนิเมชันจึงปิดอยู่')}</p>{/if}
       <label class="switch"><input type="checkbox" name="viz" bind:checked={look.viz} /><span>{tr('แสดงคลื่นเสียงในแผง “กำลังเล่น”')}</span></label>
       {#if look.viz}
         <label class="smartq">{tr('รูปแบบคลื่นเสียง')}
@@ -3532,9 +3747,13 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="np-left" oncontextmenu={(e) => current && menu(e, current)}>
       {#if current}
-        <button class="thumb big nfbtn" style:view-transition-name={nowFull ? 'none' : 'nowcover'} style:background={art(current)} aria-label={tr('เปิดหน้ากำลังเล่นเต็มหน้าต่าง')} onclick={() => setNowFull(true)}></button>
-        <span class="two"><b use:marquee>{current.title}</b><small>{tr(current.artist)}</small></span>
-        <button class="icon heart" class:on={current.fav} aria-label={current.fav ? tr('เลิกถูกใจเพลงนี้') : tr('ถูกใจเพลงนี้')} aria-pressed={!!current.fav} onclick={() => toggleFav(current!)}><Icon n="heart" size={18} fill={!!current.fav} /></button>
+        <span class="covwrap" class:breathe={playing && look.breathe && moving}>
+          {#key current.id}
+            <button class="thumb big nfbtn" in:coverIn out:fadeOut style:view-transition-name={nowFull ? 'none' : 'nowcover'} style:background={art(current)} aria-label={tr('เปิดหน้ากำลังเล่นเต็มหน้าต่าง')} onclick={() => setNowFull(true)}></button>
+          {/key}
+        </span>
+        {#key current.id}<span class="two" in:textIn><b use:marquee>{current.title}</b><small>{tr(current.artist)}</small></span>{/key}
+        <button class="icon heart" class:on={current.fav} aria-label={current.fav ? tr('เลิกถูกใจเพลงนี้') : tr('ถูกใจเพลงนี้')} aria-pressed={!!current.fav} onclick={(e) => favClick(e, current!)}><Icon n="heart" size={18} fill={!!current.fav} /></button>
       {/if}
     </div>
     <div class="np-mid">
@@ -3542,7 +3761,7 @@
         <button class="icon" class:on={shuffle} aria-label={tr('สุ่ม')} onclick={() => (shuffle = !shuffle)}><Icon n="shuffle" /></button>
         {#if current && current.dur > 900}<button class="icon skip" aria-label={tr('ถอยหลัง 15 วินาที')} onclick={() => audio && (audio.currentTime = Math.max(0, audio.currentTime - 15))}>−15</button>{/if}
         <button class="icon" aria-label={tr('ก่อนหน้า')} onclick={prev}><Icon n="prev" /></button>
-        <button class="playbtn" aria-label={playing ? tr('หยุด') : tr('เล่น')} onclick={toggle}><Icon n={playing ? 'pause' : 'play'} size={20} /></button>
+        <button class="playbtn" class:playing aria-label={playing ? tr('หยุด') : tr('เล่น')} onclick={toggle}><span class="pp"><Icon n="play" size={20} /><Icon n="pause" size={20} /></span></button>
         <button class="icon" aria-label={tr('ถัดไป')} onclick={next}><Icon n="next" /></button>
         <button class="icon skip ab" class:on={abA !== null} aria-label={tr('วนซ้ำช่วงที่เลือก (A–B)')} title={tr('วนซ้ำช่วงที่เลือก: กดครั้งแรกตั้งจุด A ครั้งที่สองตั้งจุด B ครั้งที่สามยกเลิก')} onclick={toggleAB}>{abA === null ? 'A–B' : abB === null ? 'A…' : 'A–B ✕'}</button>
         {#if current && current.dur > 900}<button class="icon skip" aria-label={tr('ข้ามไป 15 วินาที')} onclick={() => audio && (audio.currentTime += 15)}>+15</button>{/if}
@@ -3556,8 +3775,8 @@
               {#each current.wave as c, i (i)}<rect x={i + 0.15} y={10 - (+c + 1)} width="0.7" height={(+c + 1) * 2} class:played={current.dur && i / 120 < pos / current.dur} />{/each}
             </svg>
           {/if}
-          <input type="range" min="0" max={current?.dur ?? 0} step="1" value={pos} oninput={(e) => audio && (audio.currentTime = +e.currentTarget.value)} aria-label={tr('ตำแหน่งเพลง')} aria-valuetext={`${fmt(pos)} / ${fmt(current?.dur ?? 0)}`} class:haswave={!!current?.wave} />
-          {#if seekHover}<span class="seektip" style:left="{seekHover.x}px">{fmt(seekHover.t)}</span>{/if}
+          <input type="range" class="trk" style:--p="{current?.dur ? (pos / current.dur) * 100 : 0}%" min="0" max={current?.dur ?? 0} step="1" value={pos} oninput={(e) => audio && (audio.currentTime = +e.currentTarget.value)} aria-label={tr('ตำแหน่งเพลง')} aria-valuetext={`${fmt(pos)} / ${fmt(current?.dur ?? 0)}`} class:haswave={!!current?.wave} />
+          {#if seekHover}<span class="seektip" style:left="{seekHover.x}px">{fmt(seekHover.t)}</span><i class="seekline" style:left="{seekHover.x}px" aria-hidden="true"></i>{/if}
         </div>
         <small>{fmt(current?.dur ?? 0)}</small>
       </div>
@@ -3573,7 +3792,7 @@
       </button>
       <button class="icon" aria-label={tr('เปิดมินิเพลเยอร์')} title={tr('มินิเพลเยอร์')} onclick={openMini}><Icon n="mini" size={18} /></button>
       <button class="icon" aria-label={volume ? tr('ปิดเสียง') : tr('เปิดเสียง')} aria-pressed={volume === 0} onclick={toggleMute} onwheel={wheelVol}><Icon n="volume" size={18} /></button>
-      <input class="vol" type="range" min="0" max="100" bind:value={volume} onwheel={wheelVol} aria-label={tr('ระดับเสียง')} />
+      <input class="vol trk" style:--p="{volume}%" type="range" min="0" max="100" bind:value={volume} onwheel={wheelVol} aria-label={tr('ระดับเสียง')} />
       <small class="volv" aria-hidden="true">{volume}%</small>
     </div>
   </footer>
@@ -3587,7 +3806,7 @@
   <div class="nowfull" role="dialog" aria-modal="true" aria-label={tr('กำลังเล่น')}>
     <div class="kbg" style:background={art(current)}></div>
     <button class="kclose ghost" onclick={() => setNowFull(false)}>{tr('ปิด')} (Esc)</button>
-    <div class="nfcover" style:background={art(current)}></div>
+    <div class="nfcover" class:breathe={playing && look.breathe && moving} style:background={art(current)}></div>
     <div class="nfmeta">
       <h1>{current.title}</h1>
       <p><button class="alink" onclick={() => { setNowFull(false); view = 'artist:' + current!.artist; }}>{tr(current.artist)}</button>{current.album ? ' · ' + current.album : ''}</p>
@@ -3596,7 +3815,7 @@
       <div class="ctrl nfctrl">
         <button class="icon" class:on={shuffle} aria-label={tr('สุ่ม')} onclick={() => (shuffle = !shuffle)}><Icon n="shuffle" /></button>
         <button class="icon" aria-label={tr('ก่อนหน้า')} onclick={prev}><Icon n="prev" /></button>
-        <button class="playbtn big" aria-label={playing ? tr('หยุด') : tr('เล่น')} onclick={toggle}><Icon n={playing ? 'pause' : 'play'} size={28} /></button>
+        <button class="playbtn big" class:playing aria-label={playing ? tr('หยุด') : tr('เล่น')} onclick={toggle}><span class="pp"><Icon n="play" size={28} /><Icon n="pause" size={28} /></span></button>
         <button class="icon" aria-label={tr('ถัดไป')} onclick={() => next()}><Icon n="next" /></button>
         <button class="icon" class:on={repeat} aria-label={tr('เล่นซ้ำ')} onclick={() => (repeat = !repeat)}><Icon n="repeat" /></button>
       </div>
@@ -3630,7 +3849,7 @@
 {/if}
 
 {#if flash}
-  <div class="toast n flash" role="status"><span>{flash}</span></div>
+  <div in:toastT out:toastT={{ inn: false }} class="toast n flash" role="status"><span>{flash}</span></div>
 {/if}
 
 {#if helpOpen}
@@ -3648,7 +3867,7 @@
 {/if}
 
 {#if upd && !updDismissed}
-  <div class="toast n" role="status">
+  <div in:toastT out:toastT={{ inn: false }} class="toast n" role="status">
     <span>{tr('มีเวอร์ชันใหม่ {0}', upd.version)}</span>
     <button class="ghost" disabled={updBusy} onclick={() => installUpdate()}>{updBusy ? tr('กำลังโหลด…') : tr('อัปเดตเลย')}</button>
     <button class="ghost" onclick={() => (updDismissed = true)}>{tr('ไว้ก่อน')}</button>
@@ -3656,7 +3875,7 @@
 {/if}
 
 {#if notice}
-  <div class="toast n" role="status">
+  <div in:toastT out:toastT={{ inn: false }} class="toast n" role="status">
     <span class="errtxt">{notice}</span>
     {#if badTrack}<button class="ghost" onclick={() => { const t = badTrack; badTrack = null; notice = ''; if (t) toTrash([t]); }}>{tr('ลบเพลงนี้')}</button>{/if}
     <button class="ghost" onclick={() => { notice = ''; badTrack = null; }}>{tr('ปิด')}</button>
@@ -3664,7 +3883,7 @@
 {/if}
 
 {#if pasted}
-  <div class="toast" role="status">
+  <div in:toastT out:toastT={{ inn: false }} class="toast" role="status">
     <span>{tr('พบลิงก์ในคลิปบอร์ด:')} <b>{pasted.length > 48 ? pasted.slice(0, 48) + '…' : pasted}</b></span>
     <button class="primary sm" onclick={() => addDownload(pasted)}>{tr('โหลดเลย')}</button>
     <button class="ghost" onclick={() => (pasted = '')}>{tr('ปิด')}</button>
@@ -3718,6 +3937,10 @@
     <hr />
     {@render mi('trash', tr('ลบออกจากคลัง…'), () => askDeleteTrack(ctx!.t), 'Del', 'danger')}
   </div>
+{/if}
+
+{#if shareOpen && current}
+  <ShareCard title={current.title} artist={tr(current.artist)} album={current.album ?? ''} cover={current.cover ? convertFileSrc(current.cover) : null} lines={shareOpen.lines} first={shareOpen.first} accent={themeVars['--accent'] ?? '#5eead4'} onclose={() => (shareOpen = null)} onmsg={say} />
 {/if}
 
 <dialog bind:this={bulkDlg} class="edit" aria-labelledby="bulk-h">
@@ -3895,6 +4118,8 @@
   .row.dropbefore { box-shadow: inset 0 2px 0 var(--accent); }
   .row.dropafter { box-shadow: inset 0 -2px 0 var(--accent); }
   .item.dropon { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--bg-raised); }
+  .dragghost { animation: lift 180ms var(--ease-out); }
+  @keyframes lift { from { opacity: 0; transform: scale(0.9) translateY(4px); } }
   .dragghost { position: fixed; z-index: 80; pointer-events: none; padding: 6px 12px; border-radius: 999px; background: var(--accent); color: var(--on-accent); font-weight: 700; font-size: 0.85rem; box-shadow: 0 6px 18px rgba(0,0,0,.35); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   :global(body.dragging), :global(body.dragging *) { cursor: grabbing !important; user-select: none; }
   :global(body.resizing), :global(body.resizing *) { cursor: col-resize !important; user-select: none; }
@@ -4128,6 +4353,42 @@
   .playbtn { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--text); color: var(--bg-base); }
   .playbtn:hover { transform: scale(1.06); }
   .playbtn:active { transform: scale(0.95); }
+  /* เล่น/หยุด: ไอคอนสองอันซ้อนกัน หมุน+ย่อ+เบลอสลับกัน แทนการเปลี่ยนทันที */
+  .pp { display: grid; }
+  .pp > :global(*) { grid-area: 1 / 1; transition: opacity 180ms var(--ease-out), transform 220ms var(--ease-out), filter 180ms ease; }
+  .pp > :global(:last-child), .playing .pp > :global(:first-child) { opacity: 0; transform: rotate(-90deg) scale(0.5); filter: blur(3px); }
+  .playing .pp > :global(:last-child) { opacity: 1; transform: none; filter: none; }
+  .covwrap { position: relative; width: 56px; height: 56px; flex: none; display: block; }
+  .covwrap > .thumb { position: absolute; inset: 0; }
+  .breathe { animation: breathe 4.8s ease-in-out infinite; }
+  @keyframes breathe { 50% { transform: scale(1.035); } }
+  .np-left { position: relative; }
+  .np-left > .two { min-width: 0; }
+  /* แถวเพลง */
+  .row.stag { animation: rowin 300ms var(--ease-out) backwards; animation-delay: calc(var(--d) * 24ms); }
+  @keyframes rowin { from { opacity: 0; transform: translateY(8px); } }
+  .row { transition: transform 160ms var(--ease-out), opacity 160ms ease, background-color 120ms ease; }
+  .row.lifted { opacity: 0.35; transform: scale(0.98); }
+  .row.shiftdn { transform: translateY(6px); }
+  .row.shiftup { transform: translateY(-6px); }
+  /* แถบเวลา/เสียง: เส้นบาง ขยายหนาขึ้นตอนชี้ ปุ่มลากโผล่ตอนชี้ ใหญ่ขึ้นตอนกด */
+  input.trk { -webkit-appearance: none; appearance: none; height: 16px; background: transparent; cursor: pointer; }
+  input.trk::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: linear-gradient(90deg, var(--accent) var(--p), var(--line3) var(--p)); transition: height 140ms var(--ease-out); }
+  input.trk:hover::-webkit-slider-runnable-track, input.trk:active::-webkit-slider-runnable-track { height: 6px; }
+  input.trk::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; margin-top: -4px; border-radius: 50%; background: var(--text); box-shadow: 0 1px 4px #0008; transform: scale(0); transition: transform 140ms var(--ease-out), margin-top 140ms var(--ease-out); }
+  input.trk:hover::-webkit-slider-thumb, input.trk:focus-visible::-webkit-slider-thumb { transform: scale(1); margin-top: -3px; }
+  input.trk:active::-webkit-slider-thumb { transform: scale(1.3); margin-top: -3px; }
+  input.trk:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  .wave { transition: transform 160ms var(--ease-out); transform-origin: center; }
+  .seekwrap:hover .wave { transform: scaleY(1.25); }
+  .seektip { animation: tipin 140ms var(--ease-out); }
+  @keyframes tipin { from { opacity: 0; transform: translateX(-50%) translateY(3px); } }
+  .seekline { position: absolute; top: 2px; bottom: 2px; width: 1px; background: var(--text); opacity: 0.5; pointer-events: none; z-index: 2; }
+  .edit[open]::backdrop { animation: bdin 200ms ease; }
+  @keyframes bdin { from { opacity: 0; } }
+  /* ปิดแอนิเมชัน (ตั้งในแอปหรือ Windows ลดการเคลื่อนไหว) */
+  :global(html.nomo) .breathe, :global(html.nomo) .row.stag, :global(html.nomo) .seektip, :global(html.nomo) .dragghost { animation: none; }
+  :global(html.nomo) .pp > :global(*), :global(html.nomo) .row, :global(html.nomo) input.trk::-webkit-slider-thumb, :global(html.nomo) .wave { transition: none; }
   .seek { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 560px; }
   .np-right { display: flex; align-items: center; justify-content: flex-end; gap: 4px; color: var(--text-dim); }
   input[type='range'] { accent-color: var(--accent); width: 100%; height: var(--progress-h); }
@@ -4198,6 +4459,23 @@
   .tooltabs button:hover { background: var(--bg-raised); color: var(--text); }
   .tooltabs button.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent, #000); }
   .tooltabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tool.balbox { flex-direction: column; align-items: stretch; gap: 14px; }
+  .balbox > .balhead { display: flex; flex-direction: row; align-items: center; gap: 12px; }
+  .balhead > div { flex: 1; min-width: 0; }
+  .balval { min-width: 84px; text-align: center; padding: 4px 12px; border-radius: 14px; background: var(--accent); color: var(--on-accent, #000); font-weight: 700; font-variant-numeric: tabular-nums; transition: background-color 160ms ease, color 160ms ease; }
+  .balval.mid { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+  .balbox > .balbar { display: flex; flex-direction: row; align-items: center; gap: 12px; }
+  .balhead small { display: block; margin-top: 2px; }
+  .balend { display: flex; flex-direction: column; align-items: center; min-width: 36px; font-size: 11.5px; color: var(--text-dim); line-height: 1.2; }
+  .balend b { font-size: 16px; color: var(--text); }
+  .balrange { position: relative; flex: 1; display: flex; align-items: center; }
+  .balrange input { appearance: none; -webkit-appearance: none; width: 100%; height: 24px; background: transparent; cursor: pointer; }
+  /* เติมสีจากกึ่งกลางไปยังตำแหน่งปุ่ม (ไม่ใช่จากซ้ายสุด) ให้เห็นชัดว่าเอนไปข้างไหน */
+  .balrange input::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: linear-gradient(to right, var(--line2, #444) var(--lo), var(--accent) var(--lo), var(--accent) var(--hi), var(--line2, #444) var(--hi)); }
+  .balrange input::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; margin-top: -7px; border-radius: 50%; border: 0; background: var(--accent); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4); transition: transform 120ms ease; }
+  .balrange input:active::-webkit-slider-thumb { transform: scale(1.15); }
+  .balrange input:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 4px; }
+  .balmid { position: absolute; left: 50%; top: 50%; width: 2px; height: 16px; margin: -8px 0 0 -1px; background: var(--text-dim); opacity: 0.6; border-radius: 1px; pointer-events: none; }
   .tool { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; margin-bottom: 8px; border-radius: 8px; background: var(--bg-raised); }
   .switch { display: flex; align-items: center; gap: 8px; cursor: pointer; flex: none; }
   .switch input { width: 18px; height: 18px; accent-color: var(--accent); }
@@ -4218,7 +4496,7 @@
   .sleep { width: auto; min-width: 36px; padding: 0 6px; gap: 4px; display: flex; }
   .sleep small { font-variant-numeric: tabular-nums; color: inherit; }
 
-  .toast { position: fixed; left: 50%; bottom: 100px; transform: translateX(-50%); z-index: 9; display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-radius: 10px; background: var(--bg-hover); box-shadow: 0 8px 24px #000a; max-width: 90vw; animation: pop 160ms var(--ease-out); }
+  .toast { position: fixed; left: 50%; bottom: 100px; transform: translateX(-50%); z-index: 9; display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-radius: 10px; background: var(--bg-hover); box-shadow: 0 8px 24px #000a; max-width: 90vw; }
   .toast span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .toast.n { bottom: 150px; }
   .toast.n span { white-space: normal; }
@@ -4273,6 +4551,32 @@
   .theme .sw { display: flex; gap: 4px; padding: 6px; border-radius: 6px; }
   .theme .sw i { width: 22px; height: 22px; border-radius: 4px; display: block; }
   .colors { display: flex; flex-wrap: wrap; gap: 16px; }
+  .seg.wide { display: inline-flex; margin-bottom: 12px; }
+  .seg.wide button { width: auto; padding: 0 14px; height: 32px; }
+  .accbox { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
+  .bigsw { width: 88px; height: 88px; padding: 0; border: 1px solid var(--line2); border-radius: 10px; background: none; }
+  .rgbs { display: grid; gap: 8px; flex: 1; min-width: 240px; max-width: 420px; }
+  .rgb { display: grid; grid-template-columns: 36px 1fr 64px; align-items: center; gap: 10px; }
+  .rgb > span { color: var(--text-dim); font-variant-numeric: tabular-nums; font-size: 0.85em; }
+  .rgb input[type='range'] { appearance: none; -webkit-appearance: none; height: 10px; border-radius: 5px; background: var(--track); }
+  .rgb input[type='range']::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 2px solid rgba(0, 0, 0, 0.45); }
+  .rgb input[type='number'], .rgb .hex { width: 100%; font-variant-numeric: tabular-nums; }
+  .rgb .hex { grid-column: 2 / span 2; max-width: 120px; font-family: ui-monospace, monospace; }
+  .saved { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+  .chip { position: relative; display: inline-flex; }
+  .chip .dot { width: 30px; height: 30px; border-radius: 50%; border: 2px solid var(--line2); }
+  .chip .setbtn { width: 64px; height: 26px; border-radius: 13px; border: 2px solid var(--line2); }
+  .chip .on { border-color: var(--text); }
+  .chip .x { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; border-radius: 50%; font-size: 12px; line-height: 1; display: grid; place-items: center; background: var(--bg-raised); color: var(--text-dim); border: 1px solid var(--line2); opacity: 0; transition: opacity 120ms ease; }
+  .chip:hover .x, .chip:focus-within .x { opacity: 1; }
+  .cyprev { height: 14px; border-radius: 7px; margin-bottom: 12px; max-width: 560px; }
+  .stepper { display: flex; align-items: center; gap: 8px; }
+  .stepper b { min-width: 1.5em; text-align: center; font-variant-numeric: tabular-nums; }
+  .stepper .ghost { width: 32px; padding: 0; }
+  .stops { display: flex; flex-wrap: wrap; gap: 8px; }
+  .stops input { width: 40px; height: 32px; padding: 0; border: 1px solid var(--line2); border-radius: 6px; background: none; }
+  .speed { display: grid; gap: 6px; max-width: 420px; margin-top: 14px; }
+  .speed .ends { display: flex; justify-content: space-between; }
   .colors label, .sliders label { display: flex; flex-direction: column; gap: 6px; color: var(--text-dim); }
   .colors input[type='color'] { width: 64px; height: 40px; padding: 0; border: 1px solid var(--line2); border-radius: 6px; background: none; }
   .sliders { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; margin: 16px 0; }

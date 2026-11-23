@@ -1,3 +1,6 @@
+/* ลงทะเบียนสีเน้นเป็นสี เพื่อให้เปลี่ยนสีแบบไล่ได้ (เช่น สีตามปกเพลง) */
+@property --accent { syntax: '<color>'; inherits: true; initial-value: #5eead4; }
+html.acc-ease { transition: --accent 700ms ease; }
 :root {
   /* ค่าสีของ MySound — ปรับได้ที่นี่ที่เดียว */
   --bg-base: #0f1115;

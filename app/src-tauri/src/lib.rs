@@ -17,23 +17,36 @@ fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// คืนข้อความ JSON ของคลังเพลง (ว่างถ้ายังไม่เคยบันทึก)
+/// เลือกข้อความคลังที่ใช้ได้: ไฟล์หลักถ้าเป็น JSON ที่อ่านได้ ไม่งั้นลองไฟล์สำรอง (กันคลังหายถ้าไฟล์หลักพังจากไฟดับ/ดิสก์เต็ม)
+fn pick_library(main: &str, bak: Option<&str>) -> String {
+    let ok = |t: &str| serde_json::from_str::<serde_json::Value>(t).is_ok_and(|v| v.is_object());
+    if main.trim().is_empty() || ok(main) { return main.to_string(); }
+    match bak { Some(b) if ok(b) => b.to_string(), _ => main.to_string() }
+}
+
 #[tauri::command]
 fn read_library(app: AppHandle) -> Result<String, String> {
-    let p = data_dir(&app)?.join("library.json");
-    match std::fs::read_to_string(&p) {
-        Ok(s) => Ok(s),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(e.to_string()),
-    }
+    let dir = data_dir(&app)?;
+    let main = match std::fs::read_to_string(dir.join("library.json")) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.to_string()),
+    };
+    let bak = std::fs::read_to_string(dir.join("library.json.bak")).ok();
+    Ok(pick_library(&main, bak.as_deref()))
 }
 
 /// เขียนไฟล์ชั่วคราวก่อนแล้วค่อย rename กันไฟล์พังถ้าปิดแอปกลางคัน
+/// และเก็บสำเนาของเวอร์ชันก่อนหน้าเป็น library.json.bak (ไม่ถี่กว่าทุก 10 นาที) ไว้กู้
 #[tauri::command]
 fn write_library(app: AppHandle, json: String) -> Result<(), String> {
     let dir = data_dir(&app)?;
+    let (main, bak) = (dir.join("library.json"), dir.join("library.json.bak"));
+    let stale = std::fs::metadata(&bak).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map_or(true, |e| e.as_secs() > 600);
+    if stale && std::fs::read_to_string(&main).is_ok_and(|t| pick_library(&t, None) == t) { let _ = std::fs::copy(&main, &bak); }
     let tmp = dir.join("library.json.tmp");
     std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, dir.join("library.json")).map_err(|e| e.to_string())
+    std::fs::rename(&tmp, main).map_err(|e| e.to_string())
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -724,6 +737,14 @@ fn load_text(path: String) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn library_fallback() {
+        assert_eq!(super::pick_library("", Some("{\"a\":1}")), "");
+        assert_eq!(super::pick_library("{\"tracks\":[]}", Some("{}")), "{\"tracks\":[]}");
+        assert_eq!(super::pick_library("{\"tracks\":[", Some("{\"tracks\":[1]}")), "{\"tracks\":[1]}");
+        assert_eq!(super::pick_library("{\"tracks\":[", Some("oops")), "{\"tracks\":[");
+    }
+
+    #[test]
     fn safe_names() {
         assert_eq!(super::safe_name("AC/DC: Back in Black?"), "AC_DC_ Back in Black_");
         assert_eq!(super::safe_name("  end.. "), "end");
@@ -752,14 +773,21 @@ struct Lyrics {
 }
 
 fn lrclib_json(url: &str) -> Result<Option<serde_json::Value>, String> {
-    match ureq::get(url).header("User-Agent", "MySound/0.1 (personal player)").call() {
-        Ok(mut r) => {
-            let b = r.body_mut().with_config().limit(2_000_000).read_to_vec().map_err(|e| e.to_string())?;
-            Ok(serde_json::from_slice(&b).ok())
+    // ต้องมี timeout ไม่งั้นถ้า LRCLIB ช้าจะค้างไม่รู้จบ; สะดุดครั้งแรกลองอีกรอบ
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(7))).build().into();
+    let mut last = String::new();
+    for _ in 0..2 {
+        match agent.get(url).header("User-Agent", "MySound/0.1 (personal player)").call() {
+            Ok(mut r) => {
+                let b = r.body_mut().with_config().limit(2_000_000).read_to_vec().map_err(|e| e.to_string())?;
+                return Ok(serde_json::from_slice(&b).ok());
+            }
+            Err(ureq::Error::StatusCode(404)) => return Ok(None),
+            Err(ureq::Error::StatusCode(c)) if c < 500 => return Err(format!("ค้นเนื้อเพลงไม่ได้: HTTP {c}")),
+            Err(e) => last = format!("ค้นเนื้อเพลงไม่ได้: {e}"),
         }
-        Err(ureq::Error::StatusCode(404)) => Ok(None),
-        Err(e) => Err(format!("ค้นเนื้อเพลงไม่ได้: {e}")),
     }
+    Err(last)
 }
 
 fn lyrics_of(v: &serde_json::Value) -> Lyrics {
@@ -767,22 +795,26 @@ fn lyrics_of(v: &serde_json::Value) -> Lyrics {
     Lyrics { synced: f("syncedLyrics"), plain: f("plainLyrics") }
 }
 
-/// เนื้อเพลงจาก LRCLIB (ฟรี ไม่ต้องมี key): ลองจับคู่ตรงตัวก่อน ไม่เจอค่อยค้นด้วยชื่อที่ล้างแล้ว
+/// เนื้อเพลงจาก LRCLIB (ฟรี ไม่ต้องมี key): จับคู่ตรงตัวกับค้นด้วยชื่อที่ล้างแล้ว "ยิงพร้อมกัน" (เดิมรอทีละอัน)
+/// ถ้าจับคู่ตรงได้ก็ใช้ตัวนั้น ไม่งั้นใช้ผลค้นหา
 #[tauri::command]
 async fn lyrics(title: String, artist: String, dur: u32) -> Result<Lyrics, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let enc = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
         let exact = format!("https://lrclib.net/api/get?track_name={}&artist_name={}&duration={dur}", enc(&title), enc(&artist));
-        if let Some(v) = lrclib_json(&exact)? {
-            let l = lyrics_of(&v);
-            if l.synced.is_some() || l.plain.is_some() {
-                return Ok(l);
-            }
-        }
         let a = if artist == "ไม่ทราบศิลปิน" { "" } else { artist.as_str() };
-        let q = ytdlp::clean_query(&title, a);
-        let Some(serde_json::Value::Array(list)) = lrclib_json(&format!("https://lrclib.net/api/search?q={}", enc(&q)))? else {
-            return Ok(Lyrics::default());
+        let search = format!("https://lrclib.net/api/search?q={}", enc(&ytdlp::clean_query(&title, a)));
+        let h = std::thread::spawn(move || lrclib_json(&search));
+        let ex = lrclib_json(&exact);
+        let se = h.join().map_err(|_| "ค้นเนื้อเพลงไม่ได้".to_string())?;
+        if let Ok(Some(v)) = &ex {
+            let l = lyrics_of(v);
+            if l.synced.is_some() || l.plain.is_some() { return Ok(l); }
+        }
+        let list = match se {
+            Ok(Some(serde_json::Value::Array(l))) => l,
+            Ok(_) => { return ex.map(|_| Lyrics::default()); } // ค้นไม่เจอจริง (ถ้าจับคู่ตรงพังเพราะเน็ต ก็ส่ง error ต่อ)
+            Err(e) => return Err(e),
         };
         // ชอบเพลงที่ความยาวใกล้กัน (ต่างไม่เกิน 5 วินาที) และมี synced
         let near = |v: &&serde_json::Value| v["duration"].as_f64().map_or(true, |d| (d - dur as f64).abs() <= 5.0);
