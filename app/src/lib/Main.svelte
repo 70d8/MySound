@@ -20,6 +20,7 @@
     fmt, fmtDate, cover, art, hue, parseLrc, lrcIndex, splitArtistTitle, cleanLyrics, linkKey, isPlaylistLink, isSupportedLink, versionAgeDays,
     type Track, type Playlist, type Smart, type LrcLine
   } from '$lib/data';
+  import { pick as spPick, query as spQuery, parseList, type SpTrack, type Hit as SpHit } from '$lib/spmatch';
   import { THEMES, LAYOUTS, DEFAULT_LOOK, normalizeLook, lookVars, isLight, paletteFromPixels, accentVars, cycleColor, cycleSeconds, cycleGradient, rgbOf, toHex, RAINBOW, type Look } from '$lib/look';
 
   type Done = { title: string; artist: string; album: string; dur: number; playlist: string | null; url: string; thumb: string | null; path: string; cover: string | null };
@@ -73,9 +74,11 @@
   let uq = $state<number[]>([]); // คิวที่ผู้ใช้เพิ่มเอง (เล่นถัดไป / ต่อท้ายคิว)
   let history = $state<{ id: number; at: number }[]>([]); // ประวัติการเล่น ล่าสุดอยู่หน้า (เก็บ 200 รายการ)
   let stopAfter = $state(0); // หยุดหลังเล่นจบอีก N เพลง (0 = ปิด)
-  let coverAccent = $state(false); // สีเน้นตามปกเพลงที่เล่นอยู่
+  const coverAccent = $derived(look.accentMode === 'cover'); // สีเน้นตามปกเพลงที่เล่นอยู่
   let accentOv = $state<string | null>(null);
   let flash = $state('');
+  let npMore = $state(false); // เมนู … ขวาล่าง (fixed เพราะแถบเล่นตัดส่วนที่ล้น)
+  let npMoreAt = $state({ right: 16, bottom: 100 });
   let helpOpen = $state(false);
   let nowFull = $state(false); // หน้า “กำลังเล่น” เต็มหน้าต่าง
   let mainEl = $state<HTMLElement>();
@@ -96,6 +99,14 @@
   type Follow = { url: string; name: string; seen: string[]; at: number };
   let follows = $state<Follow[]>([]);
   let lfm = $state({ key: '', secret: '', sk: '', user: '', on: false });
+  // Spotify: อ่านรายชื่อเพลงแล้วหาบน YouTube (Client ID ของผู้ใช้เอง ไม่ใช่ความลับ เก็บใน prefs ได้)
+  let spCid = $state('');
+  let spUser = $state<string | null>(null);
+  let spBusy = $state(false), spMsg = $state('');
+  let spPls = $state<{ id: string; name: string; count: number; image: string | null; mine: boolean }[] | null>(null);
+  type SpItem = { t: SpTrack; st: 'wait' | 'search' | 'ok' | 'have' | 'pick' | 'none' | 'skip'; alts?: SpHit[] };
+  let pasteList = $state(''), pasteName = $state('');
+  let spImp = $state<{ name: string; plId: number; items: SpItem[]; stop: boolean; done: boolean } | null>(null);
   let autoUpd = $state(false); // ติดตั้งอัปเดตแบบเงียบให้เองเมื่อไม่ได้เล่นเพลง
   let autoYt = $state(true); // อัปเดต yt-dlp ให้เองเมื่อเก่าเกิน 14 วัน
   let remoteOn = $state(false);
@@ -236,10 +247,10 @@
         discordLy = !!p.discordLy;
         normalize = p.normalize ?? true;
         barLy = p.barLy ?? true;
-        coverAccent = !!p.coverAccent;
         if (p.alarm && typeof p.alarm === 'object') alarm = { ...alarm, ...p.alarm };
         follows = Array.isArray(p.follows) ? p.follows : [];
         if (p.lfm && typeof p.lfm === 'object') lfm = { ...lfm, ...p.lfm };
+        if (typeof p.spCid === 'string') spCid = p.spCid;
         autoUpd = !!p.autoUpd; autoYt = p.autoYt ?? true;
         watchDir = typeof p.watchDir === 'string' ? p.watchDir : ''; watchSeen = Array.isArray(p.watchSeen) ? p.watchSeen : [];
         closeToTray = p.closeToTray ?? true; hotkeys = p.hotkeys ?? true; notifyOn = p.notifyOn ?? true; taskProg = p.taskProg ?? true; trayHinted = !!p.trayHinted;
@@ -253,6 +264,7 @@
         speed = p.speed ?? 1;
         if (p.lang === 'th' || p.lang === 'en') i18n.lang = p.lang;
         look = normalizeLook(p.look);
+        if (p.coverAccent && look.accentMode === 'solid') look.accentMode = 'cover'; // ย้ายจากสวิตช์เดิมในหน้าเครื่องมือ
         if (!look.startPanel) panel = null;
         const t = library.find((x) => x.id === p.resumeId);
         if (t && audio) {
@@ -283,9 +295,15 @@
       if (e.payload.pct > 0) d.pct = d.n ? Math.min(99, (((d.idx ?? 1) - 1 + e.payload.pct / 100) / d.n) * 100) : e.payload.pct;
       d.state = e.payload.pct >= 100 ? 'converting' : 'downloading';
     });
-    await listen<[number, number, string]>('dl-skip', (e) => {
+    await listen<[number, string[] | number, string?]>('dl-skip', (e) => {
       const d = downloads.find((x) => x.id === e.payload[0]);
-      if (d) { d.skipped = e.payload[1]; d.msg = tr('โหลดไม่ได้ {0} เพลง: {1}', e.payload[1], tr(e.payload[2])); }
+      if (!d) return;
+      const errs = Array.isArray(e.payload[1]) ? e.payload[1] : Array(e.payload[1]).fill(e.payload[2] ?? '');
+      d.skipped = errs.length;
+      // รวมสาเหตุที่เหมือนกันเป็นกลุ่ม: "Video unavailable × 4"
+      const g = new Map<string, number>();
+      for (const x of errs) g.set(x, (g.get(x) ?? 0) + 1);
+      d.why = [...g].sort((a, b) => b[1] - a[1]).map(([m, n]) => ({ m: tr(m) || tr('ไม่ทราบสาเหตุ'), n }));
     });
     await listen<[number, Done]>('dl-done', (e) => onTrackDone(...e.payload));
     await listen<{ cmd: string; v?: number }>('np-cmd', (e) => {
@@ -308,7 +326,7 @@
       smart: $state.snapshot(smart),
       trash: $state.snapshot(trash),
       dupIgnore: $state.snapshot(dupIgnore),
-      prefs: { volume, shuffle, repeat, discord, discordLy, ytCookies, normalize, barLy, coverAccent, alarm: $state.snapshot(alarm), follows: $state.snapshot(follows), lfm: $state.snapshot(lfm), autoUpd, autoYt, watchDir, watchSeen: $state.snapshot(watchSeen), closeToTray, hotkeys, notifyOn, taskProg, trayHinted, cols: $state.snapshot(cols), sortKey, sortDir, eqOn, eqPreset, eqGains: $state.snapshot(eqGains), balance, mono, xfade, gapless, softFade, history: $state.snapshot(history), speed, lang: i18n.lang, look: $state.snapshot(look), resumeId: current?.id ?? null, resumePos }
+      prefs: { volume, shuffle, repeat, discord, discordLy, ytCookies, normalize, barLy, alarm: $state.snapshot(alarm), follows: $state.snapshot(follows), lfm: $state.snapshot(lfm), spCid, autoUpd, autoYt, watchDir, watchSeen: $state.snapshot(watchSeen), closeToTray, hotkeys, notifyOn, taskProg, trayHinted, cols: $state.snapshot(cols), sortKey, sortDir, eqOn, eqPreset, eqGains: $state.snapshot(eqGains), balance, mono, xfade, gapless, softFade, history: $state.snapshot(history), speed, lang: i18n.lang, look: $state.snapshot(look), resumeId: current?.id ?? null, resumePos }
     });
     const timer = setTimeout(() => invoke('write_library', { json }).catch((e) => (notice = tr('บันทึกไม่ได้: {0}', tr(String(e))))), 400);
     return () => clearTimeout(timer);
@@ -456,7 +474,7 @@
     uq = uq.filter((i) => !ids.has(i));
     selIds = selIds.filter((i) => !ids.has(i));
     selected = null;
-    say(tr('ย้าย {0} เพลงไปถังขยะแล้ว (Ctrl+Z ย้อนกลับ)', ts.length));
+    say(tr('ย้าย {0} เพลงไปถังขยะแล้ว', ts.length), { label: tr('ย้อนกลับ'), fn: undo });
   }
   function restoreTrash(items: TrashItem[]) {
     checkpoint();
@@ -598,12 +616,19 @@
     smart.push({ id, name: query.trim(), q: query.trim() });
     view = `smart:${id}`;
   }
-  function say(m: string) {
+  // แจ้งเตือนสั้นๆ; ใส่ act ได้ เช่น ปุ่มย้อนกลับ (ค้างนานขึ้นให้กดทัน และค้างไว้ตอนเอาเมาส์ชี้)
+  let flashAct = $state<{ label: string; fn: () => void } | null>(null);
+  let flashT = 0, flashHold = false;
+  function say(m: string, act?: { label: string; fn: () => void }) {
     flash = m;
-    setTimeout(() => flash === m && (flash = ''), 2200);
+    flashAct = act ?? null;
+    clearTimeout(flashT);
+    const hide = () => { if (flashHold) flashT = setTimeout(hide, 800) as unknown as number; else { flash = ''; flashAct = null; } };
+    flashT = setTimeout(hide, act ? 6000 : 2200) as unknown as number;
   }
-  function queueNext(t: Track) { uq.unshift(t.id); say(tr('จะเล่น “{0}” เป็นเพลงถัดไป', t.title)); }
-  function queueAdd(t: Track) { uq.push(t.id); say(tr('เพิ่ม “{0}” เข้าคิวแล้ว', t.title)); }
+  const flashDo = () => { const a = flashAct; flash = ''; flashAct = null; a?.fn(); };
+  function queueNext(t: Track) { uq.unshift(t.id); say(tr('จะเล่น “{0}” เป็นเพลงถัดไป', t.title), { label: tr('ย้อนกลับ'), fn: () => { const i = uq.indexOf(t.id); if (i >= 0) uq.splice(i, 1); } }); }
+  function queueAdd(t: Track) { uq.push(t.id); say(tr('เพิ่ม “{0}” เข้าคิวแล้ว', t.title), { label: tr('ย้อนกลับ'), fn: () => { const i = uq.lastIndexOf(t.id); if (i >= 0) uq.splice(i, 1); } }); }
   function prev() {
     if (!current || !audio) return;
     if (audio.currentTime > 3) audio.currentTime = 0;
@@ -641,11 +666,10 @@
   }
   $effect(() => {
     if (!audio) return;
-    audio.defaultPlaybackRate = speed; // ตั้ง default ด้วย เพราะเปลี่ยนเพลงแล้วเบราว์เซอร์จะรีเซ็ตกลับเป็นค่านี้
-    audio.playbackRate = speed;
-    decks.forEach((d) => { d.defaultPlaybackRate = speed; d.playbackRate = speed; });
+    // เร็ว/ช้าแบบเทป: คีย์เปลี่ยนตามความเร็ว (แบบ nightcore / slowed) แทนการยืดเวลาที่เสียงแตกเป็นคลื่น
+    for (const d of new Set([audio, ...decks])) { d.preservesPitch = false; d.defaultPlaybackRate = speed; d.playbackRate = speed; }
   });
-  const SPEEDS = [0.75, 1, 1.25, 1.5, 2];
+  const SPEEDS = [0.8, 0.9, 1, 1.1, 1.25, 1.5];
   const cycleSpeed = () => (speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length]);
 
   // ---------- ตัวแสดงคลื่นเสียง: ฟังเสียงผ่าน captureStream (ไม่ต่อเข้าทางออกเสียง จึงไม่มีทางทำให้เพลงเงียบ) ----------
@@ -1716,6 +1740,14 @@
     r.style.fontSize = `${look.font}%`;
     r.style.colorScheme = isLight(look) ? 'light' : 'dark';
   });
+  // ลากหน้าต่างจากแถบบน (ที่ว่างหรือข้อความ ยกเว้นช่องพิมพ์/ปุ่ม) ดับเบิลคลิก = ขยาย/คืนขนาด
+  function navDown(e: MouseEvent) {
+    if (e.button !== 0 || (e.target as HTMLElement).closest('input,button,select,textarea,a')) return;
+    e.preventDefault();
+    const w = getCurrentWindow();
+    if (e.detail === 2) w.toggleMaximize(); else w.startDragging().catch(() => {});
+  }
+
   // ---------- แอนิเมชัน ----------
   let reduced = $state(matchMedia('(prefers-reduced-motion: reduce)').matches);
   $effect(() => {
@@ -1786,6 +1818,79 @@
     svg.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.35)', offset: 0.35 }, { transform: 'scale(0.92)', offset: 0.7 }, { transform: 'scale(1)' }], { duration: 420, easing: 'ease-out' });
   }
   const favClick = (e: MouseEvent, t: Track) => { toggleFav(t); heartPop(e.currentTarget as Element, !!t.fav); };
+
+  // ---------- Spotify ----------
+  $effect(() => { invoke<string | null>('spotify_status').then((u) => (spUser = u)).catch(() => {}); });
+  async function spConnect() {
+    spBusy = true;
+    spMsg = tr('เปิดเบราว์เซอร์แล้ว ล็อกอิน Spotify แล้วกด Agree…');
+    try { spUser = await invoke<string>('spotify_login', { clientId: spCid }); spMsg = ''; say(tr('เชื่อม Spotify กับ {0} แล้ว', spUser)); }
+    catch (e) { spMsg = tr(String(e)); }
+    finally { spBusy = false; }
+  }
+  async function spDisconnect() { await invoke('spotify_logout').catch(() => {}); spUser = null; spPls = null; }
+  async function spLoadPls() {
+    spMsg = '';
+    try { spPls = await invoke('spotify_playlists'); } catch (e) { spMsg = tr(String(e)); }
+  }
+  const nkey = (s: string) => s.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  function spPut(plId: number, id: number) { const p = playlists.find((x) => x.id === plId); if (p && !p.ids.includes(id)) p.ids.push(id); }
+  /** ส่งผลที่เลือกเข้าคิวดาวน์โหลด (ถ้ามีในคลังแล้วแค่ใส่เพลย์ลิสต์) */
+  function spQueue(it: SpItem, h: SpHit) {
+    const imp = spImp;
+    if (!imp) return;
+    const have = library.find((x) => x.url && linkKey(x.url) === linkKey(h.url));
+    if (have) { spPut(imp.plId, have.id); it.st = 'have'; return; }
+    const r = prepare(h.url);
+    if ('error' in r) { it.st = 'none'; return; }
+    r.d.title = it.t.artist ? `${it.t.artist} - ${it.t.title}` : it.t.title;
+    if (it.t.artist) r.d.meta = { title: it.t.title, artist: it.t.artist, album: it.t.album }; // ไม่มีศิลปิน = ใช้ชื่อจากคลิปตามเดิม
+    plWait.set(linkKey(h.url), imp.plId);
+    it.st = 'ok';
+    pump();
+  }
+  async function spImport(src: string) {
+    if (spImp && !spImp.done) return say(tr('กำลังนำเข้าอยู่ รอให้เสร็จก่อน'));
+    spMsg = ''; err = '';
+    view = 'download';
+    let l: { name: string; tracks: SpTrack[] };
+    try { l = await invoke('spotify_tracks', { src }); }
+    catch (e) { err = tr(String(e)); return; }
+    if (!l.tracks.length) { err = tr('ไม่มีเพลงในรายการนี้'); return; }
+    await importTracks(src === 'liked' ? tr('เพลงที่ถูกใจ (Spotify)') : l.name, l.tracks);
+  }
+  /** วางรายชื่อเพลงเอง (ไม่ต้องล็อกอิน) */
+  function importPasted() {
+    const ts = parseList(pasteList);
+    if (!ts.length) return void (err = tr('วางรายชื่อเพลงก่อน บรรทัดละเพลง เช่น “ศิลปิน - ชื่อเพลง”'));
+    if (spImp && !spImp.done) return say(tr('กำลังนำเข้าอยู่ รอให้เสร็จก่อน'));
+    pasteList = '';
+    importTracks(pasteName.trim() || tr('นำเข้า {0}', new Date().toLocaleDateString(i18n.lang === 'th' ? 'th-TH' : 'en-GB')), ts);
+  }
+  /** หาเพลงแต่ละเพลงบน YouTube แล้วส่งเข้าคิวโหลด ใส่ทุกเพลงไว้ในเพลย์ลิสต์ชื่อ name */
+  async function importTracks(name: string, tracks: SpTrack[]) {
+    const plId = playlists.find((p) => p.name === name)?.id ?? newPlaylist(name);
+    spImp = { name, plId, items: tracks.map((t) => ({ t, st: 'wait' })), stop: false, done: false };
+    const imp = spImp;
+    let next = 0;
+    const worker = async () => {
+      while (!imp.stop && next < imp.items.length) {
+        const it = imp.items[next++];
+        // มีในคลังแล้ว (ชื่อ+ศิลปินตรง ความยาวใกล้กัน) ไม่ต้องค้น
+        const have = library.find((x) => nkey(x.title) === nkey(it.t.title) && nkey(x.artist).includes(nkey(it.t.artist.split(',')[0])) && (!it.t.dur || Math.abs(x.dur - it.t.dur) <= 4));
+        if (have) { spPut(imp.plId, have.id); it.st = 'have'; continue; }
+        it.st = 'search';
+        let hits: SpHit[] = [];
+        try { hits = await invoke('search_online', { query: spQuery(it.t), source: 'youtube' }); } catch { /* ค้นไม่ได้ = ให้เลือกเอง */ }
+        const r = spPick(it.t, hits);
+        if (r.sure && r.best) spQueue(it, r.best);
+        else { it.alts = r.alts; it.st = r.alts.length ? 'pick' : 'none'; }
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]); // ค้นพร้อมกัน 3 เพลง
+    imp.done = true;
+  }
+  const spCount = (st: SpItem['st']) => spImp?.items.filter((x) => x.st === st).length ?? 0;
 
   // ---------- สีเน้นแบบวนสี ----------
   let cyc = 0; // ตำแหน่งในรอบ (0..1) เก็บไว้นอก effect เปลี่ยนความเร็วแล้วสีไม่กระโดด
@@ -2265,8 +2370,8 @@
         await aiPrepare();
       }
       ai = { stage: 'run', pct: 0 };
-      // ส่งเนื้อเพลงให้ whisper เป็น prompt (ท่อนแรกๆ) ช่วยให้ฟังคำถูกขึ้น
-      const words = await invoke<Word[]>('whisper_run', { path: t.path, lang: /[\u0e00-\u0e7f]/.test(lines.join('')) ? 'th' : 'auto', prompt: lines.join(' ') });
+      // ไม่ส่งเนื้อเพลงเป็น prompt แล้ว: whisper จะ "เดา" คำในเนื้อเพลงออกมาทั้งที่ยังไม่มีคนร้อง (ช่วงอินโทร) ทำให้บรรทัดขึ้นก่อนเวลา/ฟังวน
+      const words = await invoke<Word[]>('whisper_run', { path: t.path, lang: /[\u0e00-\u0e7f]/.test(lines.join('')) ? 'th' : 'auto' });
       const { times, conf } = alignDetail(lines, words);
       const found = times.filter((x) => x !== null).length;
       if (!found) throw new Error(tr('AI ไม่ได้ยินเสียงร้องที่ตรงกับเนื้อเพลงเลย ลองตั้งเวลาเองแทน'));
@@ -2583,6 +2688,8 @@
     playlist: boolean;
     count: number;
     cur?: string; idx?: number; n?: number; skipped?: number;
+    why?: { m: string; n: number }[]; // สาเหตุที่ข้าม (เพลย์ลิสต์)
+    meta?: { title: string; artist: string; album: string }; // ชื่อ/ศิลปินจาก Spotify (สะอาดกว่าชื่อคลิป)
   };
   let downloads = $state<Dl[]>([]);
   let url = $state('');
@@ -2599,8 +2706,9 @@
       const today = new Date().toISOString().slice(0, 10);
       id = Date.now() + seq++;
       const sp = splitArtistTitle(r.title); // "ศิลปิน - ชื่อเพลง" → แยกใส่ช่องศิลปิน
-      library.unshift({ id, src: d?.src ?? 'youtube', added: today, last: today, plays: 0, title: sp?.title ?? r.title, artist: sp?.artist ?? r.artist, album: r.album, dur: r.dur, path: r.path, cover: r.cover, coverUrl: r.thumb, url: r.url });
-      if (d && !d.playlist) d.title = r.title;
+      const m = d?.meta;
+      library.unshift({ id, src: d?.src ?? 'youtube', added: today, last: today, plays: 0, title: m?.title ?? sp?.title ?? r.title, artist: m?.artist ?? sp?.artist ?? r.artist, album: m?.album || r.album, dur: r.dur, path: r.path, cover: r.cover, coverUrl: r.thumb, url: r.url });
+      if (d && !d.playlist && !m) d.title = r.title;
     }
     const put = (pid: number) => { const p = playlists.find((x) => x.id === pid); if (p && !p.ids.includes(id)) p.ids.push(id); }; // เงียบ ไม่เด้งแจ้งซ้ำตอนโหลดทั้งลิสต์
     if (r.playlist) put(playlists.find((p) => p.name === r.playlist)?.id ?? newPlaylist(r.playlist));
@@ -2635,7 +2743,7 @@
     running.add(d.id);
     d.state = 'waiting';
     d.msg = undefined;
-    d.pct = 0; d.count = 0; d.idx = 0; d.n = 0; d.skipped = 0; d.cur = undefined;
+    d.pct = 0; d.count = 0; d.idx = 0; d.n = 0; d.skipped = 0; d.cur = undefined; d.why = undefined;
     try {
       await invoke('download', { id: d.id, url: d.url, playlist: d.playlist, cookies: ytCookies });
       d.state = 'done';
@@ -2649,7 +2757,14 @@
     }
   }
   async function addDownload(raw?: string) {
-    const r = prepare((raw ?? url).trim());
+    const u = (raw ?? url).trim();
+    if (/^spotify:|open\.spotify\.com\//.test(u)) {
+      if (!spUser) { err = tr('ลิงก์ Spotify ต้องเชื่อม Spotify ก่อน: เครื่องมือ → เชื่อมต่อ (ต้องใช้ Spotify Premium)'); return; }
+      if (/\/track\//.test(u)) { err = tr('ตอนนี้รองรับลิงก์เพลย์ลิสต์และอัลบั้มของ Spotify (ยังไม่รองรับลิงก์เพลงเดี่ยว)'); return; }
+      url = '';
+      return spImport(u);
+    }
+    const r = prepare(u);
     if ('error' in r) {
       err = r.error;
       urlInput?.focus();
@@ -2756,7 +2871,7 @@
   const missingTracks = $derived(library.filter((t) => missing.includes(t.id)));
 </script>
 
-<svelte:window onpointermove={onPointerMove} onpointerup={onPointerUp} onkeydown={onKey} onkeyup={onKeyUp} onpaste={onPaste} onclick={() => ((ctx = null), (plCtx = null))} oncontextmenu={(e) => { if (e.defaultPrevented) return; ctx = null; if (!(e.target as HTMLElement)?.closest?.('input,textarea,[contenteditable]')) e.preventDefault(); }} />
+<svelte:window onpointermove={onPointerMove} onpointerup={onPointerUp} onkeydown={onKey} onkeyup={onKeyUp} onpaste={onPaste} onclick={() => ((ctx = null), (plCtx = null), (npMore = false))} oncontextmenu={(e) => { if (e.defaultPrevented) return; ctx = null; if (!(e.target as HTMLElement)?.closest?.('input,textarea,[contenteditable]')) e.preventDefault(); }} />
 
 {#each [0, 1] as i (i)}
   <audio
@@ -2874,7 +2989,8 @@
 <div class="app" class:withly={barLy && !!current} class:compact class:noright={!panel} class:hasbg={!!look.bg} style:--tint={look.tint ? tint : look.base}>
   {#if look.bg}<div class="bgwrap" aria-hidden="true">{#if isVideo(look.bg)}<video class="bgimg bgvid" src={convertFileSrc(look.bg)} autoplay muted loop playsinline style:filter="blur({look.bgBlur}px)" use:noMotion></video>{:else}<div class="bgimg" style:background-image="url('{convertFileSrc(look.bg)}')" style:filter="blur({look.bgBlur}px)"></div>{/if}</div>{/if}
   <!-- แถบบน -->
-  <header class="nav" data-tauri-drag-region>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <header class="nav" onmousedown={navDown}>
     <button class="logo" translate="no" aria-label="MySound" title="MySound" onclick={() => (view = 'home')}><span class="logomark" aria-hidden="true"><Icon n="wave" size={22} /></span></button>
     <label class="search">
       <Icon n="search" size={18} />
@@ -2947,7 +3063,7 @@
       <div class="bulkbar" role="toolbar" aria-label={tr('จัดการเพลงที่เลือก')}>
         <b>{tr('เลือก {0} เพลง', selIds.length)}</b>
         <button class="ghost" onclick={() => selTracks[0] && play(selTracks[0], selTracks)}>{tr('เล่น')}</button>
-        <button class="ghost" onclick={() => { uq.push(...selIds); say(tr('เพิ่ม {0} เพลงเข้าคิวแล้ว', selIds.length)); }}>{tr('เพิ่มเข้าคิว')}</button>
+        <button class="ghost" onclick={() => { const ids = [...selIds]; uq.push(...ids); say(tr('เพิ่ม {0} เพลงเข้าคิวแล้ว', ids.length), { label: tr('ย้อนกลับ'), fn: () => { for (const id of ids) { const i = uq.lastIndexOf(id); if (i >= 0) uq.splice(i, 1); } } }); }}>{tr('เพิ่มเข้าคิว')}</button>
         <select name="bulkpl" aria-label={tr('เพิ่มลงเพลย์ลิสต์')} onchange={(e) => { bulkToPlaylist(e.currentTarget.value); e.currentTarget.value = ''; }}>
           <option value="">{tr('เพิ่มลงเพลย์ลิสต์…')}</option>
           <option value="new">{tr('+ เพลย์ลิสต์ใหม่')}</option>
@@ -3144,9 +3260,61 @@
         <button class="primary">{tr('ดาวน์โหลด')}</button>
       </form>
       <p class="err" role="status">{err}</p>
+      {#if spUser}
+        <div class="spbox">
+          <b>Spotify</b>
+          <button class="ghost" onclick={spLoadPls}>{tr('เลือกเพลย์ลิสต์…')}</button>
+          <button class="ghost" onclick={() => spImport('liked')}>{tr('เพลงที่ถูกใจ')}</button>
+          <small class="dim">{tr('หรือวางลิงก์เพลย์ลิสต์/อัลบั้ม Spotify ในช่องด้านบน')}</small>
+        </div>
+        <p class="errtxt" role="status">{spMsg}</p>
+        {#if spPls}
+          <div class="sppls">
+            {#each spPls as p (p.id)}
+              <button class="sppl" disabled={!p.mine} title={p.mine ? p.name : tr('Spotify ไม่ให้อ่านเพลย์ลิสต์ของคนอื่น ก๊อปเพลงไปไว้ในเพลย์ลิสต์ของคุณก่อน')} onclick={() => { spPls = null; spImport(p.id); }}>
+                {#if p.image}<img src={p.image} alt="" width="40" height="40" loading="lazy" />{:else}<span class="thumb"></span>{/if}
+                <span><b>{p.name}</b><small class="dim">{p.mine ? tr('{0} เพลง', p.count) : tr('ของคนอื่น (อ่านไม่ได้)')}</small></span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      {/if}
+      <details class="pastebox">
+        <summary>{tr('วางรายชื่อเพลง (ไม่ต้องใช้ Spotify)')}</summary>
+        <textarea name="pastelist" rows="6" spellcheck="false" aria-label={tr('รายชื่อเพลง')} placeholder={tr('บรรทัดละเพลง เช่น\nThe Weeknd - Blinding Lights\nAtom ชนกันต์ - ทางของฝุ่น')} bind:value={pasteList}></textarea>
+        <div class="pasterow">
+          <input name="pastename" autocomplete="off" aria-label={tr('ชื่อเพลย์ลิสต์')} placeholder={tr('ชื่อเพลย์ลิสต์ (ไม่ใส่ก็ได้)…')} bind:value={pasteName} />
+          <button class="primary" disabled={!pasteList.trim()} onclick={importPasted}>{tr('หาและโหลด {0} เพลง', parseList(pasteList).length)}</button>
+        </div>
+      </details>
+      {#if spImp}
+        {@const found = spImp.items.filter((x) => x.st !== 'wait' && x.st !== 'search').length}
+        <div class="spimp">
+          <div class="sphead">
+            <b>{tr('นำเข้า “{0}”', spImp.name)}</b>
+            <small class="dim">{tr('หาแล้ว {0}/{1}', found, spImp.items.length)} · {tr('ส่งโหลด {0}', spCount('ok'))} · {tr('มีอยู่แล้ว {0}', spCount('have'))}{#if spCount('pick') + spCount('none')}{' · '}<span class="errtxt">{tr('ต้องเลือกเอง {0}', spCount('pick') + spCount('none'))}</span>{/if}</small>
+            {#if !spImp.done}<button class="ghost" onclick={() => spImp && (spImp.stop = true)}>{tr('หยุดค้น')}</button>{:else}<button class="ghost" onclick={() => (spImp = null)}>{tr('ปิด')}</button>{/if}
+          </div>
+          <div class="bar"><i style:width="{(found / spImp.items.length) * 100}%"></i></div>
+          {#each spImp.items as it, i (i)}
+            {#if it.st === 'pick' || it.st === 'none'}
+              <div class="sppick">
+                <span><b>{it.t.title}</b> <small class="dim">{it.t.artist}{it.t.dur ? ` · ${fmt(it.t.dur)}` : ''}</small></span>
+                <div class="spalts">
+                  {#if it.st === 'none'}<small class="dim">{tr('ไม่พบบน YouTube')}</small>{:else}<small class="dim">{tr('ไม่แน่ใจว่าตัวไหนใช่ เลือกเอง:')}</small>{/if}
+                  {#each it.alts ?? [] as h (h.url)}
+                    <button class="ghost" title={h.url} onclick={() => spQueue(it, h)}>{h.title} <small class="dim">{h.uploader} · {fmt(h.dur)}</small></button>
+                  {/each}
+                  <button class="ghost" onclick={() => (it.st = 'skip')}>{tr('ข้าม')}</button>
+                </div>
+              </div>
+            {/if}
+          {/each}
+        </div>
+      {/if}
       <h2>{tr('ค้นหาเพลง')}</h2>
       <form class="dlform" role="search" onsubmit={(e) => (e.preventDefault(), doSearch())}>
-        <div class="seg" role="group" aria-label={tr('แหล่งที่ค้น')}>
+        <div class="seg wide srcseg" role="group" aria-label={tr('แหล่งที่ค้น')}>
           <button type="button" class:on={sSource === 'youtube'} aria-pressed={sSource === 'youtube'} onclick={() => (sSource = 'youtube')}>YouTube</button>
           <button type="button" class:on={sSource === 'soundcloud'} aria-pressed={sSource === 'soundcloud'} onclick={() => (sSource = 'soundcloud')}>SoundCloud</button>
         </div>
@@ -3181,12 +3349,18 @@
         <div class="dl">
           <span class="thumb big" style:background={cover(d.title)}></span>
           <div class="grow">
-            <b>{d.playlist ? (d.n ? tr('{0} · เพลงที่ {1}/{2}', d.title, d.idx, d.n) : tr('เพลย์ลิสต์ · ได้แล้ว {0} เพลง', d.count)) : d.title}</b>
+            <b>{d.playlist && d.state !== 'done' ? (d.n ? tr('{0} · เพลงที่ {1}/{2}', d.title, d.idx, d.n) : tr('เพลย์ลิสต์ · ได้แล้ว {0} เพลง', d.count)) : d.title}</b>
             <small class="dim">{d.src === 'youtube' ? 'YouTube' : 'SoundCloud'} · {tr(stateText[d.state])}{#if d.playlist && d.cur && d.state !== 'done'} · {d.cur}{/if}{#if d.playlist && d.count} · {tr('ได้แล้ว {0}', d.count)}{/if}</small>
             {#if d.msg}<small class="errtxt">{d.msg}</small>{/if}
+            {#if d.playlist && d.state === 'done'}
+              <small class:errtxt={!!d.skipped}>{d.n && d.count < d.n ? tr('ได้ {0} จาก {1} เพลง', d.count, d.n) : tr('ได้ครบ {0} เพลง', d.count)}{#if d.skipped}{' · '}{tr('ข้าม {0} เพลง', d.skipped)}{/if}</small>
+              {#if d.why?.length}
+                <details class="dlwhy"><summary>{tr('ดูสาเหตุที่ข้าม')}</summary><ul>{#each d.why as w (w.m)}<li>{w.m}{w.n > 1 ? ` × ${w.n}` : ''}</li>{/each}</ul></details>
+              {/if}
+            {/if}
             <div class="bar"><i style:width="{d.pct}%"></i></div>
           </div>
-          {#if d.state === 'failed'}<button class="ghost" onclick={() => runJob(d)}>{tr('ลองใหม่')}</button>{:else}<span class="dim num-tab">{Math.round(d.pct)}%</span>{/if}
+          {#if d.state === 'failed'}<button class="ghost" onclick={() => runJob(d)}>{tr('ลองใหม่')}</button>{:else if d.playlist && d.state === 'done' && d.skipped}<button class="ghost" title={tr('เพลงที่มีอยู่แล้วจะไม่โหลดซ้ำ')} onclick={() => runJob(d)}>{tr('ลองโหลดที่ข้ามอีกรอบ')}</button>{:else}<span class="dim num-tab">{Math.round(d.pct)}%</span>{/if}
         </div>
       {/each}
       </div>
@@ -3261,6 +3435,30 @@
       </div>
       {/if}
       {#if toolTab === 'net'}
+      <h2>Spotify</h2>
+      <div class="tool">
+        <div><b>{tr('นำเข้าเพลย์ลิสต์จาก Spotify')} <span class="badge">{tr('ต้องใช้ Spotify Premium')}</span></b><small class="dim">{spUser ? tr('เชื่อมกับ {0} แล้ว · ไปที่หน้าดาวน์โหลดเพื่อเลือกเพลย์ลิสต์ หรือวางลิงก์เพลย์ลิสต์/อัลบั้ม Spotify ในช่องโหลดเพลง', spUser) : tr('อ่านรายชื่อเพลงจากเพลย์ลิสต์/อัลบั้มใน Spotify แล้วหาเพลงเดียวกันบน YouTube มาโหลด (ไม่ได้โหลดเสียงจาก Spotify) · Spotify ให้อ่านได้เฉพาะเพลย์ลิสต์ที่คุณสร้างหรือร่วมแก้ไข')}</small></div>
+        {#if spUser}
+          <button class="ghost" onclick={() => (view = 'download')}>{tr('ไปหน้าดาวน์โหลด')}</button>
+          <button class="ghost" onclick={spDisconnect}>{tr('ตัดการเชื่อมต่อ')}</button>
+        {:else}
+          <button class="ghost" disabled={spBusy || !spCid.trim()} onclick={spConnect}>{spBusy ? tr('รอล็อกอินในเบราว์เซอร์…') : tr('เชื่อม Spotify')}</button>
+        {/if}
+      </div>
+      {#if !spUser}
+        <div class="spsetup">
+          <label>Client ID <input name="spcid" autocomplete="off" spellcheck="false" placeholder={tr('วาง Client ID 32 ตัวอักษร…')} bind:value={spCid} /></label>
+          <details>
+            <summary>{tr('วิธีสร้าง Client ID (ทำครั้งเดียว ประมาณ 2 นาที)')}</summary>
+            <ol>
+              <li>{tr('ไปที่')} <button class="alink" onclick={() => invoke('open_url', { url: 'https://developer.spotify.com/dashboard' })}>developer.spotify.com/dashboard</button> {tr('แล้วล็อกอินด้วยบัญชี Spotify Premium')}</li>
+              <li>{tr('กด Create app ตั้งชื่ออะไรก็ได้ ช่อง Redirect URIs ใส่')} <code>http://127.0.0.1:43827/callback</code> <button class="ghost sm" onclick={() => { navigator.clipboard.writeText('http://127.0.0.1:43827/callback'); say(tr('คัดลอกแล้ว')); }}>{tr('คัดลอก')}</button> {tr('ติ๊ก Web API แล้วกด Save')}</li>
+              <li>{tr('คัดลอก Client ID จากหน้าแอปมาวางในช่องด้านบน แล้วกด “เชื่อม Spotify”')}</li>
+            </ol>
+          </details>
+        </div>
+      {/if}
+      <p class="errtxt" role="status">{spMsg}</p>
       <h2>{tr('เชื่อมต่อ')}</h2>
       <div class="tool">
         <div><b>{tr('รีโมทผ่านมือถือ')}</b><small class="dim">{tr('เปิดลิงก์บนมือถือที่ต่อ Wi‑Fi เดียวกัน เพื่อสั่งเล่น หยุด ข้าม ปรับเสียง และเลือกเพลง (Windows อาจถามให้อนุญาตผ่านไฟร์วอลล์)')}</small></div>
@@ -3417,10 +3615,6 @@
       </div>
       <p class="errtxt" role="status" aria-live="polite">{fxMsg}</p>
       <div class="tool">
-        <div><b>{tr('สีเน้นตามปกเพลง')}</b><small class="dim">{tr('เปลี่ยนสีเน้นของแอปตามปกเพลงที่กำลังเล่น (ปิดแล้วกลับเป็นสีที่ตั้งไว้)')}</small></div>
-        <label class="switch"><input type="checkbox" name="coveraccent" bind:checked={coverAccent} /><span>{coverAccent ? tr('เปิด') : tr('ปิด')}</span></label>
-      </div>
-      <div class="tool">
         <div><b>{tr('แยกชื่อศิลปินออกจากชื่อเพลง')}</b><small class="dim">{tr('ชื่อแบบ “ศิลปิน - ชื่อเพลง” จะถูกแยกไปใส่ช่องศิลปิน และเหลือแค่ชื่อเพลงในช่องชื่อ (เพลงที่โหลดใหม่ทำให้อัตโนมัติอยู่แล้ว)')}</small></div>
         <button class="ghost" disabled={!library.length} onclick={tidyTitles}>{tr('แก้ทั้งคลัง')}</button>
       </div>
@@ -3493,8 +3687,11 @@
       <div class="seg wide" role="group" aria-label={tr('แบบสีเน้น')}>
         <button type="button" class:on={look.accentMode === 'solid'} aria-pressed={look.accentMode === 'solid'} onclick={() => (look.accentMode = 'solid')}>{tr('สีเดียว')}</button>
         <button type="button" class:on={look.accentMode === 'cycle'} aria-pressed={look.accentMode === 'cycle'} onclick={() => (look.accentMode = 'cycle')}>{tr('วนหลายสี')}</button>
+        <button type="button" class:on={look.accentMode === 'cover'} aria-pressed={look.accentMode === 'cover'} onclick={() => (look.accentMode = 'cover')}>{tr('ตามปกเพลง')}</button>
       </div>
-      {#if look.accentMode === 'solid'}
+      {#if look.accentMode === 'cover'}
+        <p class="dim">{tr('สีเน้นจะเปลี่ยนตามปกเพลงที่กำลังเล่น ถ้าเพลงไม่มีปก จะใช้สีจากโหมดสีเดียว')}</p>
+      {:else if look.accentMode === 'solid'}
         {@const c = rgbOf(look.accent)}
         <div class="accbox">
           <input type="color" class="bigsw" name="accent" aria-label={tr('สีเน้น')} bind:value={look.accent} />
@@ -3534,7 +3731,7 @@
               <input type="color" aria-label={tr('สีที่ {0}', i + 1)} bind:value={look.accentStops[i]} />
             {/each}
           </div>
-          <button class="ghost rainbow" onclick={() => (look.accentStops = [...RAINBOW])}>🌈 {tr('สีรุ้ง')}</button>
+          <button class="ghost rainbow" onclick={() => (look.accentStops = [...RAINBOW])}>{tr('สีรุ้ง')}</button>
         </div>
         <label class="speed">
           <span>{tr('ความเร็ว')} <b>{look.accentSpeed}</b> <small class="dim">({tr('{0} วินาที/รอบ', cycleSeconds(look.accentSpeed).toFixed(cycleSeconds(look.accentSpeed) < 10 ? 1 : 0))})</small></span>
@@ -3550,7 +3747,6 @@
             </span>
           {/each}
         </div>
-        {#if coverAccent}<p class="dim">{tr('ตอนวนสี จะไม่ใช้สีตามปกเพลง')}</p>{/if}
       {/if}
       <h2>{tr('ปรับสีเอง')}</h2>
       <div class="colors">
@@ -3786,11 +3982,18 @@
       <button class="icon tab" class:on={panel === 'lyrics'} aria-label={tr('เนื้อเพลง')} title={tr('เนื้อเพลง')} onclick={() => (panel = panel === 'lyrics' ? null : 'lyrics')}><Icon n="lyrics" /><span class="lbl">{tr('เนื้อเพลง')}</span></button>
       <button class="icon tab" class:on={panel === 'queue'} aria-label={tr('คิว')} title={tr('คิว')} onclick={() => (panel = panel === 'queue' ? null : 'queue')}><Icon n="queue" /><span class="lbl">{tr('คิว')}</span></button>
       <button class="icon tab" class:on={panel === 'now'} aria-label={tr('กำลังเล่น')} title={tr('กำลังเล่น')} onclick={() => (panel = panel === 'now' ? null : 'now')}><Icon n="songs" /><span class="lbl">{tr('กำลังเล่น')}</span></button>
-      <button class="icon speed" class:on={speed !== 1} aria-label={tr('ความเร็วเล่น {0} เท่า กดเพื่อเปลี่ยน', speed)} title={tr('ความเร็วเล่น')} onclick={cycleSpeed}>{speed}×</button>
-      <button class="icon sleep" class:on={sleepMin > 0} aria-label={sleepMin ? tr('ตั้งเวลาปิดเสียง {0} นาที กดเพื่อเปลี่ยน', sleepMin) : tr('ตั้งเวลาปิดเสียง (ปิดอยู่)')} title={tr('ตั้งเวลาปิดเสียง')} onclick={cycleSleep}>
-        <Icon n="moon" size={18} />{#if sleepMin}<small>{fmt(sleepLeft)}</small>{/if}
-      </button>
-      <button class="icon" aria-label={tr('เปิดมินิเพลเยอร์')} title={tr('มินิเพลเยอร์')} onclick={openMini}><Icon n="mini" size={18} /></button>
+      {#if speed !== 1}<button class="icon speed on" aria-label={tr('ความเร็วเล่น {0} เท่า กดเพื่อเปลี่ยน', speed)} title={tr('ความเร็วเล่น')} onclick={cycleSpeed}>{speed}×</button>{/if}
+      {#if sleepMin > 0}<button class="icon sleep on" aria-label={tr('ตั้งเวลาปิดเสียง {0} นาที กดเพื่อเปลี่ยน', sleepMin)} title={tr('ตั้งเวลาปิดเสียง')} onclick={cycleSleep}><Icon n="moon" size={18} /><small>{fmt(sleepLeft)}</small></button>{/if}
+      <span class="npmorewrap">
+        <button class="icon" class:on={npMore} aria-label={tr('ตัวเลือกเพิ่มเติม')} title={tr('ตัวเลือกเพิ่มเติม')} aria-haspopup="menu" aria-expanded={npMore} onclick={(e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); npMoreAt = { right: innerWidth - r.right, bottom: innerHeight - r.top + 8 }; npMore = !npMore; }}><Icon n="more" size={18} /></button>
+        {#if npMore}
+          <div class="npmore" role="menu" tabindex="-1" style:right="{npMoreAt.right}px" style:bottom="{npMoreAt.bottom}px" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === 'Escape' && (npMore = false)}>
+            <button role="menuitem" onclick={cycleSpeed}><span>{tr('ความเร็วเล่น')}</span><b>{speed}×</b></button>
+            <button role="menuitem" onclick={cycleSleep}><Icon n="moon" size={16} /><span>{tr('ตั้งเวลาปิดเสียง')}</span><b>{sleepMin ? tr('{0} นาที', sleepMin) : tr('ปิดอยู่')}</b></button>
+            <button role="menuitem" onclick={() => { npMore = false; openMini(); }}><Icon n="mini" size={16} /><span>{tr('มินิเพลเยอร์')}</span></button>
+          </div>
+        {/if}
+      </span>
       <button class="icon" aria-label={volume ? tr('ปิดเสียง') : tr('เปิดเสียง')} aria-pressed={volume === 0} onclick={toggleMute} onwheel={wheelVol}><Icon n="volume" size={18} /></button>
       <input class="vol trk" style:--p="{volume}%" type="range" min="0" max="100" bind:value={volume} onwheel={wheelVol} aria-label={tr('ระดับเสียง')} />
       <small class="volv" aria-hidden="true">{volume}%</small>
@@ -3849,7 +4052,7 @@
 {/if}
 
 {#if flash}
-  <div in:toastT out:toastT={{ inn: false }} class="toast n flash" role="status"><span>{flash}</span></div>
+  <div in:toastT out:toastT={{ inn: false }} class="toast n flash" role="status" onpointerenter={() => (flashHold = true)} onpointerleave={() => (flashHold = false)}><span>{flash}</span>{#if flashAct}<button class="ghost sm" onclick={flashDo}>{flashAct.label}</button>{/if}</div>
 {/if}
 
 {#if helpOpen}
@@ -3935,7 +4138,7 @@
     {@render mi('download', tr('แปลงเป็น MP3…'), () => toMp3([ctx!.t]))}
     <button role="menuitem" onclick={() => openEdit(ctx!.t)}><Icon n="tools" size={16} /><span>{tr('ตั้งค่าเพลง…')}</span></button>
     <hr />
-    {@render mi('trash', tr('ลบออกจากคลัง…'), () => askDeleteTrack(ctx!.t), 'Del', 'danger')}
+    {@render mi('trash', tr('ย้ายไปถังขยะ'), () => askDeleteTrack(ctx!.t), 'Del', 'danger')}
   </div>
 {/if}
 
@@ -4228,6 +4431,42 @@
   .hist .qrow { display: flex; align-items: center; gap: 12px; }
   .hist .qrow .dim { margin-left: auto; white-space: nowrap; }
   .toast.flash { bottom: calc(var(--npbar-h) + 24px); }
+  .toast .ghost.sm { padding: 4px 12px; color: var(--accent); font-weight: 600; }
+  .npmorewrap { position: relative; display: inline-flex; }
+  .npmore { position: fixed; z-index: 30; min-width: 220px; padding: 4px; border-radius: 8px; background: var(--bg-hover); box-shadow: 0 8px 24px #000a; transform-origin: bottom right; animation: pop 140ms var(--ease-out); color: var(--text); }
+  .npmore button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border-radius: 6px; text-align: left; }
+  .npmore button:hover, .npmore button:focus-visible { background: var(--line2); outline: 0; }
+  .npmore span { flex: 1; }
+  .npmore b { color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 600; }
+  .pastebox { margin: 4px 0 8px; }
+  .pastebox summary { cursor: pointer; width: fit-content; color: var(--text-dim); padding: 4px 0; }
+  .pastebox textarea { width: 100%; max-width: 640px; display: block; margin: 8px 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line2); background: var(--bg-raised); color: var(--text); font: inherit; resize: vertical; }
+  .pasterow { display: flex; gap: 8px; max-width: 640px; }
+  .pasterow input { flex: 1; height: 38px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line2); background: var(--bg-raised); color: var(--text); }
+  .badge { display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 600; background: #1db95422; color: #1ed760; vertical-align: 1px; }
+  .spsetup { display: grid; gap: 8px; margin: -4px 0 8px; padding: 12px 16px; border-radius: 8px; background: var(--bg-raised); }
+  .spsetup label { display: flex; align-items: center; gap: 10px; color: var(--text-dim); }
+  .spsetup input { flex: 1; max-width: 360px; height: 34px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--line2); background: var(--bg-base); color: var(--text); font-family: ui-monospace, monospace; }
+  .spsetup ol { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 6px; color: var(--text-dim); }
+  .spsetup code { user-select: all; }
+  .spbox { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 4px 0; }
+  .sppls { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin: 8px 0 12px; }
+  .sppl { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 8px; background: var(--bg-raised); text-align: left; min-width: 0; }
+  .sppl:hover:not(:disabled) { background: var(--bg-hover); }
+  .sppl:disabled { opacity: 0.45; cursor: not-allowed; }
+  .sppl img, .sppl .thumb { width: 40px; height: 40px; border-radius: 4px; object-fit: cover; flex: none; background: var(--line2); }
+  .sppl > span { display: grid; min-width: 0; }
+  .sppl b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .spimp { margin: 8px 0 16px; padding: 12px 16px; border-radius: 8px; background: var(--bg-raised); }
+  .sphead { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .sphead small { flex: 1; }
+  .sppick { display: grid; gap: 6px; padding: 10px 0; border-top: 1px solid var(--line); }
+  .spalts { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .spalts .ghost { max-width: 100%; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dlwhy { margin-top: 2px; font-size: 0.8125rem; color: var(--text-dim); }
+  .dlwhy summary { cursor: pointer; width: fit-content; }
+  .dlwhy ul { margin: 4px 0 0; padding-left: 18px; }
+  .nav { user-select: none; }
   .helpbg { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: rgba(0,0,0,.5); }
   .helpbox { background: var(--bg-raised, #1a1b1e); color: var(--text); padding: 20px 24px; border-radius: 12px; min-width: 360px; max-height: 80vh; overflow: auto; }
   .helpbox dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 12px 0; }
@@ -4553,6 +4792,8 @@
   .colors { display: flex; flex-wrap: wrap; gap: 16px; }
   .seg.wide { display: inline-flex; margin-bottom: 12px; }
   .seg.wide button { width: auto; padding: 0 14px; height: 32px; }
+  .seg.srcseg { margin: 0; align-self: stretch; flex: none; }
+  .seg.srcseg button { height: 100%; min-height: 36px; white-space: nowrap; }
   .accbox { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
   .bigsw { width: 88px; height: 88px; padding: 0; border: 1px solid var(--line2); border-radius: 10px; background: none; }
   .rgbs { display: grid; gap: 8px; flex: 1; min-width: 240px; max-width: 420px; }

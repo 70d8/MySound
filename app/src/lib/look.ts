@@ -22,7 +22,7 @@ export type Look = {
   bgBlur: number; // px เบลอรูปพื้นหลัง
   motion: boolean; // แอนิเมชันของแอป
   breathe: boolean; // ปกเพลงหายใจตอนเล่น
-  accentMode: 'solid' | 'cycle'; // สีเดียว หรือวนสีเอง
+  accentMode: 'solid' | 'cycle' | 'cover'; // สีเดียว / วนสีเอง / ตามปกเพลงที่เล่นอยู่
   accentStops: string[]; // สีที่วนผ่าน (2–8 สี)
   accentSpeed: number; // 1 (ช้า) – 10 (เร็ว)
   accentSaved: string[]; // สีที่บันทึกไว้
@@ -102,7 +102,7 @@ export function normalizeLook(x: Partial<Look> | null | undefined): Look {
     bgBlur: num(o.bgBlur, 0, 24, d.bgBlur),
     motion: o.motion ?? d.motion,
     breathe: o.breathe ?? d.breathe,
-    accentMode: o.accentMode === 'cycle' ? 'cycle' : 'solid',
+    accentMode: o.accentMode === 'cycle' || o.accentMode === 'cover' ? o.accentMode : 'solid',
     accentStops: hexList(o.accentStops, 2, 8) ?? d.accentStops,
     accentSpeed: Math.round(num(o.accentSpeed, 1, 10, d.accentSpeed)),
     accentSaved: hexList(o.accentSaved, 0, 24) ?? [],

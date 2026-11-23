@@ -21,8 +21,13 @@ export function alignDetail(lines: string[], words: Word[]): { times: (number | 
   for (const w of words) {
     const cs = [...keep(w.text)];
     // ช่วงยาว (โหมดสำรองที่ได้เป็นประโยค): กระจายเวลาตามตำแหน่งตัวอักษร ไม่ให้ทุกตัวได้เวลาเริ่มเดียวกัน
-    const span = w.end !== undefined && cs.length > 3 ? Math.max(0, w.end - w.ms) / 1000 : 0;
-    cs.forEach((c, k) => { R.push(c); tOf.push(w.ms / 1000 + (span * k) / cs.length); });
+    // คำแรกหลังช่วงดนตรี whisper มักให้เวลาเริ่มตั้งแต่ต้นช่วงเงียบ (ช่วงยาวเกินกว่าที่ร้องคำนั้นได้) → ขยับไปใกล้เวลาจบแทน
+    const dur = w.end !== undefined ? Math.max(0, w.end - w.ms) : 0;
+    const fit = 400 + cs.length * 250; // ms ที่ร้องคำยาวเท่านี้ได้ (เผื่อร้องลากเสียง)
+    const ms = dur > fit + 1000 ? w.end! - fit : w.ms;
+    const span = cs.length > 3 ? Math.min(dur, fit + 1000) / 1000 : 0;
+    const start = ms / 1000;
+    cs.forEach((c, k) => { R.push(c); tOf.push(start + (span * k) / cs.length); });
   }
   const n = L.length, m = R.length;
   const out: (number | null)[] = lines.map(() => null);
@@ -69,9 +74,10 @@ export function alignDetail(lines: string[], words: Word[]): { times: (number | 
       if (hit.length >= ks.length / 2) out[ln] = tOf[match[hit[0]]];
     }
   }
-  // เวลาต้องเพิ่มขึ้นเรื่อยๆ: ตัดค่าที่ย้อนหลังทิ้ง แล้วเติมช่องที่ขาดด้วยการประมาณเชิงเส้น
-  let last = -1;
-  for (let i = 0; i < out.length; i++) { const v = out[i]; if (v !== null) { if (v < last) { out[i] = null; conf[i] = 0; } else last = v; } }
+  // เวลาต้องเพิ่มขึ้นเรื่อยๆ: เก็บชุดบรรทัดที่เรียงเวลาถูกต้องที่ยาวที่สุด แล้วทิ้งเฉพาะตัวที่หลุด
+  // (แบบเดิมตัดทุกบรรทัดที่น้อยกว่าค่าล่าสุด บรรทัดเดียวที่ไปจับท่อนฮุกท้ายเพลงผิด จะลากบรรทัดหลังจากนั้นทิ้งหมด)
+  const keepIdx = increasing(out);
+  for (let i = 0; i < out.length; i++) if (out[i] !== null && !keepIdx.has(i)) { out[i] = null; conf[i] = 0; }
   return { times: out, conf };
 }
 
@@ -99,4 +105,20 @@ export function weakLines(times: (number | null)[], conf: number[], full: number
     if (g < 0.4 || g > 40) bad.add(i);
   }
   return [...bad].sort((a, b) => a - b);
+}
+
+/** ดัชนีของลำดับย่อยที่เวลาเพิ่มขึ้น (ไม่ลด) ที่ยาวที่สุด ข้าม null */
+function increasing(t: (number | null)[]): Set<number> {
+  const idx = t.map((v, i) => (v === null ? -1 : i)).filter((i) => i >= 0);
+  const tails: number[] = [], prev = new Array<number>(idx.length).fill(-1), pos: number[] = [];
+  idx.forEach((i, k) => {
+    const v = t[i]!;
+    let lo = 0, hi = tails.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (t[idx[tails[mid]]]! <= v) lo = mid + 1; else hi = mid; }
+    if (lo > 0) prev[k] = tails[lo - 1];
+    tails[lo] = k; pos[lo] = k;
+  });
+  const keep = new Set<number>();
+  for (let k = tails.length ? tails[tails.length - 1] : -1; k >= 0; k = prev[k]) keep.add(idx[k]);
+  return keep;
 }

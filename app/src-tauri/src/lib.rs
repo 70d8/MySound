@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter, Manager};
 use ytdlp::Line;
 mod extra;
+mod spotify;
 
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let d = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -144,7 +145,7 @@ fn run_download(app: &AppHandle, id: u64, url: &str, playlist: bool, cookies: &s
     let _ = status;
     // เพลงในเพลย์ลิสต์ที่โหลดไม่ได้ (ถูกลบ/ส่วนตัว/บล็อกประเทศ) แจ้งให้หน้าจอรู้ ไม่เงียบหาย
     if count > 0 && !errs.is_empty() {
-        let _ = app.emit("dl-skip", (id, errs.len(), errs.last().cloned().unwrap_or_default()));
+        let _ = app.emit("dl-skip", (id, errs.clone())); // ส่งทุกสาเหตุ หน้าจอจะสรุปเป็นกลุ่มให้
     }
     if count > 0 {
         Ok(count) // ถ้ามีบางเพลงในเพลย์ลิสต์พัง แต่ได้อย่างน้อย 1 เพลงก็ถือว่าสำเร็จ
@@ -984,7 +985,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![read_library, write_library, download, genius_cover, import_cover, missing_files, delete_files, tool_version, ytdlp_update, process_audio, export_library, lyrics, discord_update, discord_clear, check_update, install_update, storage_info, relink, lyrics_cache_read, lyrics_cache_write, write_lrc_files, search_online, read_text_file, launch_files, tray_tooltip, import_files, scan_folder, save_text, load_text, extra::open_url, extra::save_png, extra::yt_info, extra::cut_audio, extra::convert_mp3, extra::import_bg_video, extra::lastfm_token, extra::lastfm_session, extra::lastfm_track, extra::remote_start, extra::remote_stop, extra::remote_push, extra::whisper_state, extra::whisper_setup, extra::whisper_setup_cancel, extra::whisper_run, extra::whisper_cancel])
+        .invoke_handler(tauri::generate_handler![read_library, write_library, download, genius_cover, import_cover, missing_files, delete_files, tool_version, ytdlp_update, process_audio, export_library, lyrics, discord_update, discord_clear, check_update, install_update, storage_info, relink, lyrics_cache_read, lyrics_cache_write, write_lrc_files, search_online, read_text_file, launch_files, tray_tooltip, import_files, scan_folder, save_text, load_text, extra::open_url, extra::save_png, extra::yt_info, extra::cut_audio, extra::convert_mp3, extra::import_bg_video, extra::lastfm_token, extra::lastfm_session, extra::lastfm_track, extra::remote_start, extra::remote_stop, extra::remote_push, extra::whisper_state, extra::whisper_setup, extra::whisper_setup_cancel, extra::whisper_run, extra::whisper_cancel, spotify::spotify_status, spotify::spotify_logout, spotify::spotify_login, spotify::spotify_playlists, spotify::spotify_tracks])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

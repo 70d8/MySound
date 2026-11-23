@@ -40,6 +40,9 @@ body {
   height: 100%;
   overflow: hidden;
 }
+/* แอปเหมือนโปรแกรม ไม่ใช่หน้าเว็บ: กดลากแล้วไม่คลุมข้อความทั้งจอ (ช่องพิมพ์/ข้อความแจ้งเตือนยังเลือกคัดลอกได้) */
+body { user-select: none; -webkit-user-select: none; }
+input, textarea, [contenteditable], .errtxt, [role='status'], pre, code, .lytext { user-select: text; -webkit-user-select: text; }
 button {
   font: inherit;
   color: inherit;
