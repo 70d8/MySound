@@ -29,7 +29,17 @@
   let library = $state<Track[]>([]);
   let playlists = $state<Playlist[]>([]);
   let loaded = $state(false); // กันเขียนทับไฟล์ด้วยคลังว่างก่อนอ่านเสร็จ
-  const TOOL_TABS = [['gen', 'ทั่วไป'], ['snd', 'เสียง'], ['lib', 'คลังเพลง'], ['lyr', 'เนื้อเพลง'], ['net', 'เชื่อมต่อ'], ['sys', 'ระบบ']] as const;
+  const TOOL_TABS = [['gen', 'ทั่วไป'], ['snd', 'เสียง'], ['lib', 'คลังเพลง'], ['lyr', 'เนื้อเพลง'], ['net', 'เชื่อมต่อ'], ['char', 'ตัวละคร'], ['keys', 'ปุ่มลัด'], ['sys', 'ระบบ']] as const;
+  // รายการปุ่มลัดทั้งหมด (ใช้ทั้งหมวดปุ่มลัดในเครื่องมือและหน้าต่างช่วยเหลือที่กด ?) — แก้ที่นี่ที่เดียว
+  const KEYS: { title: string; note?: string; rows: [string, string][] }[] = [
+    { title: 'ควบคุมการเล่น', rows: [['Space', 'เล่น/หยุด'], ['← →', 'ย้อน/ข้าม 5 วินาที (Shift = 15)'], ['↑ ↓', 'เพิ่ม/ลดเสียง 5%'], ['N / P', 'เพลงถัดไป / ก่อนหน้า'], ['M', 'ปิดเสียง'], ['S', 'สุ่มเล่น เปิด/ปิด'], ['R', 'เล่นซ้ำ เปิด/ปิด'], ['A', 'วนซ้ำช่วง A–B (กดครั้งแรก = จุด A, ครั้งที่สอง = จุด B, ครั้งที่สาม = ยกเลิก)']] },
+    { title: 'เพลงที่กำลังเล่น', rows: [['L', 'ถูกใจ / เลิกถูกใจ'], ['0–5', 'ให้ดาว (0 = ล้างดาว)'], ['Q', 'เปิด/ปิดคิวเล่น'], ['Y', 'เปิด/ปิดเนื้อเพลง'], ['F', 'เนื้อเพลงเต็มจอ'], ['[ / ]', 'เนื้อเพลงเร็วขึ้น / ช้าลง 0.1 วินาที']] },
+    { title: 'ค้นหา เลือก และลบ', rows: [['Ctrl+K', 'ค้นหาและคำสั่งทั้งหมด'], ['Ctrl+คลิก', 'เลือกเพลงเพิ่มทีละเพลง'], ['Shift+คลิก', 'เลือกเป็นช่วง'], ['Ctrl+A', 'เลือกทั้งหมดในรายการ'], ['Esc', 'ยกเลิกการเลือก / ปิดเมนู / ออกจากเต็มจอ'], ['Delete', 'ย้ายเพลงที่เลือกไปถังขยะ'], ['Ctrl+Z', 'ย้อนกลับ'], ['Ctrl+Y หรือ Ctrl+Shift+Z', 'ทำซ้ำ'], ['?', 'เปิดหน้าต่างรายการปุ่มลัด']] },
+    { title: 'ตอนตั้งเวลาเนื้อเพลง (โหมด Sync)', rows: [['Space หรือ Enter', 'ประทับเวลาให้บรรทัดนี้ แล้วไปบรรทัดถัดไป'], ['Backspace', 'ถอยกลับไปบรรทัดก่อนหน้า']] },
+    { title: 'ในเมนูคลิกขวาและช่องค้นหา', rows: [['↑ ↓', 'เลื่อนรายการ'], ['Enter', 'เลือกรายการ'], ['Esc', 'ปิด']] },
+    { title: 'ปุ่มลัดทั้งระบบ', note: 'ใช้ได้แม้อยู่ในเกมหรือแอปอื่น (เปิด/ปิดได้ที่หมวดทั่วไป) · ปุ่มมีเดียบนคีย์บอร์ดและหูฟังก็ควบคุมเพลงได้เช่นกัน', rows: [['Ctrl+Alt+Space', 'เล่น/หยุด'], ['Ctrl+Alt+→', 'เพลงถัดไป'], ['Ctrl+Alt+←', 'เพลงก่อนหน้า'], ['Ctrl+Alt+↑', 'เพิ่มเสียง'], ['Ctrl+Alt+↓', 'ลดเสียง']] },
+    { title: 'เมาส์', rows: [['คลิกเพลง', 'เล่นเพลงนั้น'], ['คลิกขวา', 'เมนูของเพลง/เพลย์ลิสต์'], ['ลากเพลง', 'ไปวางที่เพลย์ลิสต์ในแถบซ้าย หรือจัดลำดับในเพลย์ลิสต์'], ['ลากแถบด้านบน', 'ย้ายหน้าต่าง (ดับเบิลคลิก = ขยาย/คืนขนาด)'], ['ล้อเมาส์บนตัวละคร', 'ขยาย/ย่อตัวละคร (ถ้าไม่ได้ล็อก)']] }
+  ];
   let toolTab = $state<(typeof TOOL_TABS)[number][0]>('gen');
   let view = $state('home'); // home | songs | download | tools | pl:<id> | auto:<id>
   let query = $state('');
@@ -106,6 +116,11 @@
   let spPls = $state<{ id: string; name: string; count: number; image: string | null; mine: boolean }[] | null>(null);
   type SpItem = { t: SpTrack; st: 'wait' | 'search' | 'ok' | 'have' | 'pick' | 'none' | 'skip'; alts?: SpHit[] };
   let pasteList = $state(''), pasteName = $state('');
+  // ตัวละครบนหน้าจอ: เก็บได้หลายตัว แสดงทีละตัว (ตำแหน่ง/ขนาดจำแยกต่อตัว)
+  type Pet = { id: string; name: string; idle: string; hover: string; press: string; size: number; locked: boolean; x?: number; y?: number };
+  let pets = $state<Pet[]>([]);
+  let petId = $state<string | null>(null);
+  let petOn = $state(false), petBounce = $state(false), petLife = $state(true), petLy = $state(false), petMsg = $state('');
   let spImp = $state<{ name: string; plId: number; items: SpItem[]; stop: boolean; done: boolean } | null>(null);
   let autoUpd = $state(false); // ติดตั้งอัปเดตแบบเงียบให้เองเมื่อไม่ได้เล่นเพลง
   let autoYt = $state(true); // อัปเดต yt-dlp ให้เองเมื่อเก่าเกิน 14 วัน
@@ -251,6 +266,10 @@
         follows = Array.isArray(p.follows) ? p.follows : [];
         if (p.lfm && typeof p.lfm === 'object') lfm = { ...lfm, ...p.lfm };
         if (typeof p.spCid === 'string') spCid = p.spCid;
+        if (Array.isArray(p.pets)) pets = p.pets.filter((x: Pet) => x && typeof x.id === 'string').map((x: Pet) => ({ ...x, size: Math.min(800, Math.max(48, +x.size || 200)), locked: !!x.locked }));
+        petId = typeof p.petId === 'string' && pets.some((x) => x.id === p.petId) ? p.petId : (pets[0]?.id ?? null);
+        petOn = !!p.petOn;
+        petBounce = !!p.petBounce; petLife = p.petLife ?? true; petLy = !!p.petLy;
         autoUpd = !!p.autoUpd; autoYt = p.autoYt ?? true;
         watchDir = typeof p.watchDir === 'string' ? p.watchDir : ''; watchSeen = Array.isArray(p.watchSeen) ? p.watchSeen : [];
         closeToTray = p.closeToTray ?? true; hotkeys = p.hotkeys ?? true; notifyOn = p.notifyOn ?? true; taskProg = p.taskProg ?? true; trayHinted = !!p.trayHinted;
@@ -326,7 +345,7 @@
       smart: $state.snapshot(smart),
       trash: $state.snapshot(trash),
       dupIgnore: $state.snapshot(dupIgnore),
-      prefs: { volume, shuffle, repeat, discord, discordLy, ytCookies, normalize, barLy, alarm: $state.snapshot(alarm), follows: $state.snapshot(follows), lfm: $state.snapshot(lfm), spCid, autoUpd, autoYt, watchDir, watchSeen: $state.snapshot(watchSeen), closeToTray, hotkeys, notifyOn, taskProg, trayHinted, cols: $state.snapshot(cols), sortKey, sortDir, eqOn, eqPreset, eqGains: $state.snapshot(eqGains), balance, mono, xfade, gapless, softFade, history: $state.snapshot(history), speed, lang: i18n.lang, look: $state.snapshot(look), resumeId: current?.id ?? null, resumePos }
+      prefs: { volume, shuffle, repeat, discord, discordLy, ytCookies, normalize, barLy, alarm: $state.snapshot(alarm), follows: $state.snapshot(follows), lfm: $state.snapshot(lfm), spCid, pets: $state.snapshot(pets), petId, petOn, petBounce, petLife, petLy, autoUpd, autoYt, watchDir, watchSeen: $state.snapshot(watchSeen), closeToTray, hotkeys, notifyOn, taskProg, trayHinted, cols: $state.snapshot(cols), sortKey, sortDir, eqOn, eqPreset, eqGains: $state.snapshot(eqGains), balance, mono, xfade, gapless, softFade, history: $state.snapshot(history), speed, lang: i18n.lang, look: $state.snapshot(look), resumeId: current?.id ?? null, resumePos }
     });
     const timer = setTimeout(() => invoke('write_library', { json }).catch((e) => (notice = tr('บันทึกไม่ได้: {0}', tr(String(e))))), 400);
     return () => clearTimeout(timer);
@@ -679,7 +698,7 @@
   let vsrc: MediaStreamAudioSourceNode | undefined;
   let vizSrc = '';
   function attachViz() {
-    if (vizFx || !audio || !look.viz || vizSrc === audio.currentSrc) return;
+    if (vizFx || !audio || (!look.viz && !(petOn && petBounce)) || vizSrc === audio.currentSrc) return;
     try {
       actx ??= new AudioContext();
       analyser ??= Object.assign(actx.createAnalyser(), { fftSize: 128, smoothingTimeConstant: 0.8 });
@@ -1819,6 +1838,79 @@
   }
   const favClick = (e: MouseEvent, t: Track) => { toggleFav(t); heartPop(e.currentTarget as Element, !!t.fav); };
 
+  // ---------- ตัวละคร ----------
+  const pet = $derived(pets.find((x) => x.id === petId) ?? null);
+  const PET_SLOTS = [['idle', 'อยู่เฉยๆ'], ['hover', 'เอาเมาส์ชี้'], ['press', 'คลิก']] as const;
+  const petMissing = (p: Pet | null) => (p ? PET_SLOTS.filter(([k]) => !p[k]).map(([, l]) => tr(l)) : []);
+  const petReady = $derived(!!pet && petMissing(pet).length === 0);
+  function addPet() {
+    const p: Pet = { id: crypto.randomUUID(), name: tr('ตัวละคร {0}', pets.length + 1), idle: '', hover: '', press: '', size: 200, locked: false };
+    pets.push(p);
+    petId = p.id;
+  }
+  async function pickSprite(k: 'idle' | 'hover' | 'press') {
+    if (!pet) return;
+    const f = await open({ filters: [{ name: tr('รูปภาพ'), extensions: ['png', 'gif', 'webp'] }] });
+    if (typeof f !== 'string') return;
+    petMsg = '';
+    try { pet[k] = await invoke<string>('pet_import', { src: f, old: pet[k] || null }); } catch (e) { petMsg = tr(String(e)); }
+  }
+  function delPet(p: Pet) {
+    invoke('delete_files', { paths: [p.idle, p.hover, p.press].filter(Boolean) }).catch(() => {});
+    pets = pets.filter((x) => x !== p);
+    if (petId === p.id) { petId = pets[0]?.id ?? null; if (!pets.length) petOn = false; }
+  }
+  // ความดังของเพลง (เสียงทุ้ม) ส่งให้ตัวละครราว 30 ครั้ง/วินาที เฉพาะตอนเปิดโหมดเด้งและเพลงกำลังเล่น
+  $effect(() => {
+    if (!petOn || !petReady || !petBounce || !playing || !moving) return;
+    attachViz();
+    const bins = new Uint8Array(64);
+    let last = -1;
+    const t = setInterval(() => {
+      if (!analyser) return;
+      analyser.getByteFrequencyData(bins);
+      let sum = 0;
+      for (let i = 1; i < 9; i++) sum += bins[i];
+      const lv = Math.round(Math.min(1, (sum / 8 / 255) * 1.35) * 100) / 100;
+      if (lv !== last) { last = lv; emit('pet-level', lv).catch(() => {}); }
+    }, 33);
+    return () => clearInterval(t);
+  });
+  const petCfg = () => pet && { idle: pet.idle, hover: pet.hover, press: pet.press, size: pet.size, locked: pet.locked, x: pet.x, y: pet.y, bounce: petBounce, life: petLife, ly: petLy, line: petLy && playing && ly.status === 'ready' ? curLine : '', playing, bpm: current?.bpm ?? 0, lang: i18n.lang, motion: moving };
+  // เปิด/ปิดหน้าต่างตามสวิตช์ (ใส่รูปไม่ครบ = ไม่เปิด) และส่งค่าล่าสุดให้ทุกครั้งที่เปลี่ยน
+  let petWinId = '';
+  $effect(() => {
+    const want = petOn && petReady ? pet!.id : '';
+    if (want === petWinId) return;
+    petWinId = want;
+    (async () => {
+      const ex = await WebviewWindow.getByLabel('pet');
+      if (ex) await ex.close().catch(() => {});
+      if (!want) return;
+      if (ex) await new Promise((r) => setTimeout(r, 150)); // รอหน้าต่างเก่าปิดก่อนสร้างใหม่ (สลับตัวละคร)
+      new WebviewWindow('pet', { url: '/', title: 'MySound Character', width: 200, height: 200, transparent: true, decorations: false, alwaysOnTop: true, skipTaskbar: true, shadow: false, resizable: false, focus: false, visible: false });
+    })().catch((e) => (petMsg = tr(String(e))));
+  });
+  $effect(() => {
+    const c = petCfg();
+    if (petWinId && c) emit('pet-cfg', $state.snapshot(c)).catch(() => {});
+  });
+  onMount(() => {
+    const subs = [
+      listen('pet-ready', () => { const c = petCfg(); if (c) emit('pet-cfg', $state.snapshot(c)); }),
+      listen<{ size?: number; x?: number; y?: number; locked?: boolean; side?: 'left' | 'right'; hide?: boolean }>('pet-set', (e) => {
+        const p = pet, v = e.payload;
+        if (!p) return;
+        if (v.size) p.size = v.size;
+        if (v.x != null && v.y != null) { p.x = v.x; p.y = v.y; }
+        if (v.locked != null) p.locked = v.locked;
+        if (v.side) emit('pet-snap', v.side);
+        if (v.hide) petOn = false;
+      })
+    ];
+    return () => subs.forEach((s) => s.then((f) => f()));
+  });
+
   // ---------- Spotify ----------
   $effect(() => { invoke<string | null>('spotify_status').then((u) => (spUser = u)).catch(() => {}); });
   async function spConnect() {
@@ -2150,11 +2242,11 @@
     if (current?.id === t.id) ly = r;
   }
   $effect(() => {
-    if ((panel === 'lyrics' || barLy || karaoke || lyFloatOpen || (discord && discordLy)) && current) loadLyrics(current);
+    if ((panel === 'lyrics' || barLy || karaoke || lyFloatOpen || (petOn && petLy) || (discord && discordLy)) && current) loadLyrics(current);
   });
   // พรีโหลดเนื้อเพลงของ 2 เพลงถัดไปในคิวขณะเพลงนี้เล่น พอถึงเพลงนั้นก็ขึ้นทันที
   $effect(() => {
-    if (!(panel === 'lyrics' || barLy || karaoke || lyFloatOpen || (discord && discordLy)) || !current || !playing) return;
+    if (!(panel === 'lyrics' || barLy || karaoke || lyFloatOpen || (petOn && petLy) || (discord && discordLy)) || !current || !playing) return;
     const ahead = queue.slice(0, 2).filter((t) => !t.lrc && !lyCache.has(t.id) && !lyDisk[t.id] && !lyFlight.has(t.id));
     const timer = setTimeout(() => ahead.forEach((t) => void fetchLy(t).catch(() => {})), 1500); // ให้เพลงปัจจุบันได้ก่อน
     return () => clearTimeout(timer);
@@ -2488,7 +2580,7 @@
   }
 
   // ---------- ถูกใจ / ให้ดาว ----------
-  const toggleFav = (t: Track) => (t.fav = !t.fav);
+  const toggleFav = (t: Track) => { t.fav = !t.fav; if (t.fav && petWinId && t.id === current?.id) emit('pet-heart').catch(() => {}); };
 
   // ---------- ลบ (มีหน้าต่างยืนยันเสมอ) ----------
   let confirmDlg = $state<HTMLDialogElement>();
@@ -2543,6 +2635,19 @@
       checkpoint();
       playlists = playlists.filter((x) => x.id !== p.id);
       if (view === `pl:${p.id}`) view = 'home';
+    });
+  }
+  // ลบเพลย์ลิสต์พร้อมเพลงในนั้น: เพลงไปถังขยะ (กู้คืนได้) ย้อนกลับครั้งเดียวได้ทั้งเพลย์ลิสต์และเพลง
+  function plDeleteAll(p: Playlist) {
+    plCtx = null;
+    const find = () => p.ids.map((id) => library.find((t) => t.id === id)).filter((t): t is Track => !!t);
+    const n = find().length;
+    ask(tr('ลบเพลย์ลิสต์ “{0}” พร้อมเพลง {1} เพลงในนั้น? เพลงจะไปอยู่ในถังขยะ (กู้คืนได้) และหายจากเพลย์ลิสต์อื่นด้วย', p.name, n), tr('ลบทั้งหมด'), () => {
+      const ts = find();
+      if (ts.length) toTrash(ts); else checkpoint();
+      playlists = playlists.filter((x) => x.id !== p.id);
+      if (view === `pl:${p.id}`) view = 'home';
+      say(tr('ลบเพลย์ลิสต์ “{0}” และ {1} เพลงแล้ว', p.name, ts.length), { label: tr('ย้อนกลับ'), fn: undo });
     });
   }
   const askDeletePlaylist = () =>
@@ -3546,6 +3651,72 @@
         <button class="ghost" onclick={redo}>{tr('ทำซ้ำ')}</button>
       </div>
       {/if}
+      {#if toolTab === 'char'}
+      <h2>{tr('ตัวละครบนหน้าจอ')}</h2>
+      <div class="tool">
+        <div><b>{tr('แสดงตัวละคร')}</b><small class="dim">{!pet ? tr('เพิ่มตัวละครก่อน แล้วใส่รูปให้ครบ 3 แบบ') : petReady ? tr('ลอยอยู่บนหน้าจอเสมอ ย่อแอปแล้วก็ยังอยู่ · คลิกขวาที่ตัวละครเพื่อล็อก ย้ายมุม หรือซ่อน') : tr('ยังขาดรูป: {0}', petMissing(pet).join(', '))}</small></div>
+        <label class="switch"><input type="checkbox" name="peton" bind:checked={petOn} disabled={!petReady} /><span>{petOn && petReady ? tr('เปิด') : tr('ปิดอยู่')}</span></label>
+      </div>
+      <div class="petlist" role="listbox" aria-label={tr('ตัวละครที่บันทึกไว้')}>
+        {#each pets as p (p.id)}
+          <button class="petchip" class:on={p.id === petId} role="option" aria-selected={p.id === petId} onclick={() => (petId = p.id)}>
+            <span class="petthumb checker">{#if p.idle}<img src={convertFileSrc(p.idle)} alt="" width="40" height="40" />{/if}</span>
+            <span>{p.name}</span>
+          </button>
+        {/each}
+        <button class="petchip add" onclick={addPet}><span class="petthumb">+</span><span>{tr('เพิ่มตัวละคร')}</span></button>
+      </div>
+      {#if pet}
+        <div class="petedit">
+          <label class="petname">{tr('ชื่อ')}<input name="petname" autocomplete="off" maxlength="32" bind:value={pet.name} /></label>
+          <div class="petslots">
+            {#each PET_SLOTS as [k, label], i (k)}
+              <div class="petslot" class:missing={!pet[k]}>
+                <div class="petimg checker">{#if pet[k]}<img src={convertFileSrc(pet[k])} alt={tr(label)} />{:else}<span class="dim">{tr('ยังไม่มีรูป')}</span>{/if}</div>
+                <b>{i + 1} · {tr(label)}</b>
+                <button class="ghost" onclick={() => pickSprite(k)}>{pet[k] ? tr('เปลี่ยนรูป') : tr('เลือกรูป')}</button>
+              </div>
+            {/each}
+          </div>
+          <small class="dim">{tr('รองรับ PNG (พื้นโปร่งใส), GIF และ WebP แบบขยับได้ ไม่เกิน 20 MB · ส่วนที่โปร่งใสของรูปคลิกทะลุไปโปรแกรมข้างหลังได้')}</small>
+          {#if petReady}
+            <div class="pettry">
+              <span class="dim">{tr('ลองชี้และคลิก:')}</span>
+              <span class="petdemo checker" tabindex="-1"><img class="s1" src={convertFileSrc(pet.idle)} alt="" /><img class="s2" src={convertFileSrc(pet.hover)} alt="" /><img class="s3" src={convertFileSrc(pet.press)} alt="" /></span>
+            </div>
+          {/if}
+          <div class="petrow">
+            <label class="petsize"><span>{tr('ขนาด')} <b>{pet.size}px</b></span><input type="range" min="48" max="800" step="4" bind:value={pet.size} disabled={pet.locked} aria-label={tr('ขนาดตัวละคร')} /></label>
+            <div class="seg wide" role="group" aria-label={tr('ย้ายไปมุมจอ')}>
+              <button type="button" disabled={!petOn || pet.locked} onclick={() => emit('pet-snap', 'left')}>{tr('มุมซ้ายล่าง')}</button>
+              <button type="button" disabled={!petOn || pet.locked} onclick={() => emit('pet-snap', 'right')}>{tr('มุมขวาล่าง')}</button>
+            </div>
+          </div>
+          <label class="switch"><input type="checkbox" name="petlock" bind:checked={pet.locked} /><span>{tr('ล็อกตำแหน่งและขนาด (ยังชี้/คลิกตัวละครได้)')}</span></label>
+          <div class="seg wide" role="group" aria-label={tr('โหมดตัวละคร')}>
+            <button type="button" class:on={!petBounce} aria-pressed={!petBounce} onclick={() => (petBounce = false)}>{tr('แบบปกติ')}</button>
+            <button type="button" class:on={petBounce} aria-pressed={petBounce} onclick={() => (petBounce = true)}>{tr('เด้งตามเพลง')}</button>
+          </div>
+          {#if petBounce}<small class="dim">{tr('เด้งตามความดังของเพลงตอนเล่น (ถ้าอ่านเสียงไม่ได้จะเด้งตามจังหวะ BPM แทน) หยุดเพลงแล้วหยุดเด้ง')}</small>{/if}
+          <label class="switch"><input type="checkbox" name="petlife" bind:checked={petLife} /><span>{tr('ท่าทางมีชีวิต: หายใจตอนหยุดเพลง, หลับเมื่อหยุดนาน, หัวใจลอยตอนกดถูกใจ')}</span></label>
+          <label class="switch"><input type="checkbox" name="petly" bind:checked={petLy} /><span>{tr('แสดงเนื้อเพลงบรรทัดที่กำลังร้องเหนือตัวละคร')}</span></label>
+          <p class="errtxt" role="status">{petMsg}</p>
+          <button class="ghost danger" onclick={() => delPet(pet!)}>{tr('ลบตัวละครนี้')}</button>
+        </div>
+      {/if}
+      {/if}
+      {#if toolTab === 'keys'}
+      <p class="dim">{tr('ปุ่มเหล่านี้ไม่ทำงานตอนกำลังพิมพ์ในช่องข้อความ')}</p>
+      {#each KEYS as g (g.title)}
+        <h2>{tr(g.title)}</h2>
+        {#if g.note}<p class="dim">{tr(g.note)}</p>{/if}
+        <dl class="keylist">
+          {#each g.rows as [k, d] (k)}
+            <dt><kbd>{k}</kbd></dt><dd>{tr(d)}</dd>
+          {/each}
+        </dl>
+      {/each}
+      {/if}
       {#if toolTab === 'sys'}
       <h2>{tr('โปรแกรมที่แอปเรียกใช้')}</h2>
       <div class="tool">
@@ -3840,6 +4011,7 @@
         <button class="icon big" aria-label={tr('สุ่มเล่นเพลย์ลิสต์')} title={tr('สุ่มเล่น')} onclick={() => shufflePlay(plTracks)}><Icon n="shuffle" size={22} /></button>{/if}
         <button class="ghost" onclick={startRename}>{tr('เปลี่ยนชื่อ')}</button>
         <button class="ghost danger" onclick={askDeletePlaylist}>{tr('ลบเพลย์ลิสต์')}</button>
+        <button class="ghost danger" onclick={() => pl && plDeleteAll(pl)}>{tr('ลบเพลย์ลิสต์และเพลงในนั้น')}</button>
       </div>
       <div class="plbar">
         <button class="ghost" onclick={() => pl && exportM3u(pl)}>{tr('ส่งออก M3U…')}</button>
@@ -4059,11 +4231,14 @@
   <div class="helpbg" role="presentation" onclick={() => (helpOpen = false)}>
     <div class="helpbox" role="dialog" aria-modal="true" aria-label={tr('ปุ่มลัด')} tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === 'Escape' && (helpOpen = false)}>
       <h2>{tr('ปุ่มลัด')}</h2>
-      <dl>
-        {#each [['Space', 'เล่น/หยุด'], ['← →', 'ย้อน/ข้าม 5 วินาที (Shift = 15)'], ['↑ ↓', 'เพิ่ม/ลดเสียง'], ['N / P', 'เพลงถัดไป / ก่อนหน้า'], ['M', 'ปิดเสียง'], ['S / R', 'สุ่ม / เล่นซ้ำ'], ['L', 'ถูกใจ'], ['0–5', 'ให้ดาวเพลงที่เล่นอยู่'], ['A', 'วนซ้ำช่วง A–B'], ['[ / ]', 'เนื้อเพลงเร็วขึ้น / ช้าลง 0.1 วินาที'], ['Q / Y', 'เปิดคิว / เนื้อเพลง'], ['F', 'เนื้อเพลงเต็มจอ'], ['Ctrl+K', 'ค้นหาและคำสั่ง'], ['Ctrl/Shift+คลิก', 'เลือกหลายเพลง'], ['Ctrl+A', 'เลือกทั้งหมดในรายการ'], ['Delete', 'ย้ายเพลงที่เลือกไปถังขยะ'], ['Ctrl+Z / Ctrl+Y', 'ย้อนกลับ / ทำซ้ำ'], ['?', 'หน้านี้']] as [k, d]}
-          <dt><kbd>{k}</kbd></dt><dd>{tr(d)}</dd>
-        {/each}
-      </dl>
+      {#each KEYS as g (g.title)}
+        <h3>{tr(g.title)}</h3>
+        <dl>
+          {#each g.rows as [k, d] (k)}
+            <dt><kbd>{k}</kbd></dt><dd>{tr(d)}</dd>
+          {/each}
+        </dl>
+      {/each}
       <button class="ghost" onclick={() => (helpOpen = false)}>{tr('ปิด')}</button>
     </div>
   </div>
@@ -4104,6 +4279,7 @@
     <button role="menuitem" onclick={() => { plCtx!.p.pinned = !plCtx!.p.pinned; plCtx = null; }}><Icon n="plus" size={16} /><span>{plCtx.p.pinned ? tr('เลิกปักหมุด') : tr('ปักหมุด')}</span></button>
     <hr />
     <button role="menuitem" class="danger" onclick={() => plDelete(plCtx!.p)}><Icon n="trash" size={16} /><span>{tr('ลบเพลย์ลิสต์')}</span></button>
+    <button role="menuitem" class="danger" onclick={() => plDeleteAll(plCtx!.p)}><Icon n="trash" size={16} /><span>{tr('ลบเพลย์ลิสต์และเพลงในนั้น')}</span></button>
   </div>
 {/if}
 
@@ -4438,6 +4614,30 @@
   .npmore button:hover, .npmore button:focus-visible { background: var(--line2); outline: 0; }
   .npmore span { flex: 1; }
   .npmore b { color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 600; }
+  .checker { background: repeating-conic-gradient(#ffffff14 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
+  .petlist { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+  .petchip { display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 6px; border-radius: 10px; background: var(--bg-raised); border: 2px solid transparent; }
+  .petchip.on { border-color: var(--accent); }
+  .petchip:hover { background: var(--bg-hover); }
+  .petthumb { width: 40px; height: 40px; border-radius: 6px; display: grid; place-items: center; overflow: hidden; background-color: var(--line2); font-size: 1.4rem; color: var(--text-dim); }
+  .petthumb img { width: 100%; height: 100%; object-fit: contain; }
+  .petchip.add { color: var(--text-dim); }
+  .petedit { display: grid; gap: 12px; padding: 16px; border-radius: 10px; background: var(--bg-raised); max-width: 760px; }
+  .petname { display: flex; align-items: center; gap: 10px; color: var(--text-dim); }
+  .petname input { flex: 1; max-width: 280px; height: 34px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--line2); background: var(--bg-base); color: var(--text); }
+  .petslots { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .petslot { display: grid; gap: 8px; justify-items: center; padding: 12px; border-radius: 8px; border: 1px solid var(--line2); text-align: center; }
+  .petslot.missing { border-style: dashed; }
+  .petimg { width: 100%; aspect-ratio: 1; max-height: 150px; border-radius: 6px; display: grid; place-items: center; overflow: hidden; }
+  .petimg img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .pettry { display: flex; align-items: center; gap: 12px; }
+  .petdemo { position: relative; width: 96px; height: 96px; border-radius: 8px; cursor: pointer; }
+  .petdemo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; visibility: hidden; }
+  .petdemo .s1, .petdemo:hover .s2, .petdemo:active .s3 { visibility: visible; }
+  .petdemo:hover .s1, .petdemo:active .s2 { visibility: hidden; }
+  .petedit .seg, .petedit > .danger { justify-self: start; margin: 0; }
+  .petrow { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; }
+  .petsize { display: grid; gap: 6px; flex: 1; min-width: 220px; max-width: 360px; }
   .pastebox { margin: 4px 0 8px; }
   .pastebox summary { cursor: pointer; width: fit-content; color: var(--text-dim); padding: 4px 0; }
   .pastebox textarea { width: 100%; max-width: 640px; display: block; margin: 8px 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line2); background: var(--bg-raised); color: var(--text); font: inherit; resize: vertical; }
@@ -4471,6 +4671,10 @@
   .helpbox { background: var(--bg-raised, #1a1b1e); color: var(--text); padding: 20px 24px; border-radius: 12px; min-width: 360px; max-height: 80vh; overflow: auto; }
   .helpbox dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 12px 0; }
   .helpbox dt { text-align: right; } .helpbox dd { margin: 0; color: var(--text-dim); }
+  .helpbox h3 { margin: 14px 0 0; font-size: 0.85rem; color: var(--text-dim); font-weight: 600; }
+  .helpbox dl { margin: 6px 0; }
+  .keylist { display: grid; grid-template-columns: minmax(150px, max-content) 1fr; gap: 8px 18px; margin: 8px 0 22px; }
+  .keylist dt { text-align: right; } .keylist dd { margin: 0; color: var(--text-dim); }
   kbd { padding: 1px 7px; border-radius: 5px; border: 1px solid var(--line, rgba(255,255,255,.2)); font-size: 0.85em; }
   :global(.two b.mq) { display: inline-block; overflow: visible; text-overflow: clip; animation: mq var(--mqt, 4s) linear infinite alternate; }
   @keyframes mq { to { transform: translateX(var(--mq)); } }

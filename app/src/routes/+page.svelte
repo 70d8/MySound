@@ -3,9 +3,10 @@
   import Main from '$lib/Main.svelte';
   import Mini from '$lib/Mini.svelte';
   import LyFloat from '$lib/LyFloat.svelte';
+  import Pet from '$lib/Pet.svelte';
 
   // มินิเพลเยอร์คือหน้าต่างที่ชื่อ (label) ว่า "mini" ใช้หน้าเดียวกัน ไม่ต้องพึ่ง query ใน URL
   const label = getCurrentWindow().label;
 </script>
 
-{#if label === 'mini'}<Mini />{:else if label === 'lyrics'}<LyFloat />{:else}<Main />{/if}
+{#if label === 'mini'}<Mini />{:else if label === 'lyrics'}<LyFloat />{:else if label === 'pet'}<Pet />{:else}<Main />{/if}

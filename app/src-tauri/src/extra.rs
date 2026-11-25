@@ -620,3 +620,34 @@ mod wtests {
         assert_eq!(w[1].text, " world");
     }
 }
+
+// ---------- ตัวละครบนหน้าจอ (sprite) ----------
+fn pets_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let d = data_dir(app)?.join("music").join("pets"); // โฟลเดอร์ย่อย: ตัวสแกนไฟล์ขยะดูแค่ชั้นบนสุด จึงไม่ลบไฟล์เหล่านี้
+    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+    Ok(d)
+}
+
+/// คัดลอกรูป sprite (png/gif/webp ≤ 20 MB) มาเก็บในแอป คืนพาธใหม่; ลบไฟล์เดิมของช่องนั้นถ้ามี
+#[tauri::command]
+pub fn pet_import(app: AppHandle, src: String, old: Option<String>) -> Result<String, String> {
+    let dir = pets_dir(&app)?;
+    let p = std::path::Path::new(src.trim().trim_matches('"'));
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if !["png", "gif", "webp"].contains(&ext.as_str()) { return Err("รองรับเฉพาะรูป .png .gif และ .webp".into()); }
+    if std::fs::metadata(p).map_err(|e| e.to_string())?.len() > 20 * 1024 * 1024 { return Err("รูปใหญ่เกิน 20 MB".into()); }
+    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let out = dir.join(format!("sprite-{millis}.{ext}"));
+    std::fs::copy(p, &out).map_err(|e| e.to_string())?;
+    if let Some(o) = old.map(PathBuf::from).filter(|o| o.starts_with(&dir) && o != &out) { let _ = std::fs::remove_file(o); }
+    Ok(out.display().to_string())
+}
+
+/// ไบต์ของรูป sprite (หน้าต่างตัวละครทำเป็น blob URL เพื่ออ่านค่าความโปร่งใสของพิกเซลได้)
+#[tauri::command]
+pub fn pet_bytes(app: AppHandle, path: String) -> Result<tauri::ipc::Response, String> {
+    let dir = pets_dir(&app)?;
+    let p = PathBuf::from(&path);
+    if !p.starts_with(&dir) { return Err("ไฟล์อยู่นอกโฟลเดอร์ตัวละคร".into()); }
+    Ok(tauri::ipc::Response::new(std::fs::read(&p).map_err(|e| e.to_string())?))
+}
